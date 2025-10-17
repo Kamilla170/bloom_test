@@ -27,7 +27,7 @@ class PlantDatabase:
             raise
             
     async def create_tables(self):
-        """Создание таблиц"""
+        """ИСПРАВЛЕНО: Создание таблиц с правильными constraints"""
         async with self.pool.acquire() as conn:
             # Таблица пользователей
             await conn.execute("""
@@ -264,6 +264,7 @@ class PlantDatabase:
                 )
             """)
             
+            # ИСПРАВЛЕНО: Таблица reminders БЕЗ некорректного ON CONFLICT в структуре
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS reminders (
                     id SERIAL PRIMARY KEY,
@@ -314,7 +315,21 @@ class PlantDatabase:
             except Exception as e:
                 logger.info(f"Колонки уже существуют: {e}")
             
-            # Индексы для оптимизации
+            # ИСПРАВЛЕНО: Добавляем unique constraints для таблицы reminders
+            # Это необходимо для корректной работы с напоминаниями
+            await conn.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_reminders_unique_plant_active 
+                ON reminders (user_id, plant_id, reminder_type)
+                WHERE is_active = TRUE AND plant_id IS NOT NULL
+            """)
+            
+            await conn.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_reminders_unique_growing_active 
+                ON reminders (user_id, growing_plant_id, reminder_type)
+                WHERE is_active = TRUE AND growing_plant_id IS NOT NULL
+            """)
+            
+            # Обычные индексы для оптимизации
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_plants_user_id ON plants (user_id)")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_plants_state ON plants (current_state)")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_plant_state_history_plant_id ON plant_state_history (plant_id)")
@@ -702,17 +717,20 @@ class PlantDatabase:
                 WHERE user_id = $1 AND id = $2
             """, user_id, plant_id)
     
-    # === МЕТОДЫ ДЛЯ НАПОМИНАНИЙ ===
+    # === МЕТОДЫ ДЛЯ НАПОМИНАНИЙ (ИСПРАВЛЕНО) ===
     
     async def create_reminder(self, user_id: int, plant_id: int, reminder_type: str, next_date: datetime):
-        """Создать напоминание"""
+        """ИСПРАВЛЕНО: Создать напоминание с правильной деактивацией старых"""
         async with self.pool.acquire() as conn:
+            # Сначала деактивируем все старые напоминания этого типа
             await conn.execute("""
                 UPDATE reminders 
                 SET is_active = FALSE 
-                WHERE user_id = $1 AND plant_id = $2 AND reminder_type = $3 AND is_active = TRUE
+                WHERE user_id = $1 AND plant_id = $2 
+                  AND reminder_type = $3 AND is_active = TRUE
             """, user_id, plant_id, reminder_type)
             
+            # Создаем новое напоминание
             await conn.execute("""
                 INSERT INTO reminders (user_id, plant_id, reminder_type, next_date)
                 VALUES ($1, $2, $3, $4)
@@ -824,14 +842,16 @@ class PlantDatabase:
     
     async def create_growing_reminder(self, growing_id: int, user_id: int, reminder_type: str, 
                                     next_date: datetime, stage_number: int = None, task_day: int = None):
-        """Создать напоминание для выращивания"""
+        """ИСПРАВЛЕНО: Создать напоминание для выращивания"""
         async with self.pool.acquire() as conn:
+            # Деактивируем старые напоминания этого типа
             await conn.execute("""
                 UPDATE reminders 
                 SET is_active = FALSE 
                 WHERE growing_plant_id = $1 AND reminder_type = $2 AND is_active = TRUE
             """, growing_id, reminder_type)
             
+            # Создаем новое напоминание
             await conn.execute("""
                 INSERT INTO reminders 
                 (user_id, growing_plant_id, reminder_type, next_date, stage_number, task_day)
