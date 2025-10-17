@@ -5,6 +5,8 @@ from datetime import datetime, timedelta
 import json
 import base64
 from io import BytesIO
+import html
+import re
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, StateFilter
@@ -29,6 +31,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 MOSCOW_TZ = pytz.timezone('Europe/Moscow')
+UTC_TZ = pytz.UTC
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -132,20 +135,36 @@ class FeedbackStates(StatesGroup):
     writing_message = State()
 
 def get_moscow_now():
+    """Получить текущее время в московской timezone"""
     return datetime.now(MOSCOW_TZ)
 
 def get_moscow_date():
+    """Получить текущую дату в московской timezone"""
     return get_moscow_now().date()
 
-def moscow_to_naive(moscow_datetime):
-    if moscow_datetime.tzinfo is not None:
-        return moscow_datetime.replace(tzinfo=None)
-    return moscow_datetime
+def moscow_to_utc(moscow_datetime):
+    """ИСПРАВЛЕНО: Правильная конвертация московского времени в UTC для БД"""
+    if moscow_datetime.tzinfo is None:
+        # Если datetime naive, считаем что это Москва
+        moscow_datetime = MOSCOW_TZ.localize(moscow_datetime)
+    
+    # Конвертируем в UTC
+    utc_datetime = moscow_datetime.astimezone(UTC_TZ)
+    
+    # Возвращаем naive UTC (для PostgreSQL)
+    return utc_datetime.replace(tzinfo=None)
+
+def utc_to_moscow(utc_datetime):
+    """ИСПРАВЛЕНО: Правильная конвертация UTC из БД в московское время"""
+    if utc_datetime.tzinfo is None:
+        # Если datetime naive, считаем что это UTC
+        utc_datetime = UTC_TZ.localize(utc_datetime)
+    
+    # Конвертируем в московское время
+    return utc_datetime.astimezone(MOSCOW_TZ)
 
 def clean_markdown_formatting(text: str) -> str:
     """Очистить Markdown и некорректное HTML форматирование из текста"""
-    import re
-    
     if not text:
         return ""
     
@@ -494,14 +513,26 @@ async def send_task_reminder(reminder_row):
             [InlineKeyboardButton(text="📸 Добавить фото", callback_data=f"add_diary_photo_{growing_id}")],
         ]
         
-        if reminder_row['photo_file_id']:
-            await bot.send_photo(
-                chat_id=user_id,
-                photo=reminder_row['photo_file_id'],
-                caption=message_text,
-                parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
-            )
+        # ИСПРАВЛЕНО: Проверка photo_file_id перед отправкой
+        photo_file_id = reminder_row.get('photo_file_id')
+        if photo_file_id and photo_file_id != 'default_growing':
+            try:
+                await bot.send_photo(
+                    chat_id=user_id,
+                    photo=photo_file_id,
+                    caption=message_text,
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
+                )
+            except Exception as e:
+                logger.error(f"Ошибка отправки фото в напоминании: {e}")
+                # Fallback на текстовое сообщение
+                await bot.send_message(
+                    chat_id=user_id,
+                    text=message_text,
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
+                )
         else:
             await bot.send_message(
                 chat_id=user_id,
@@ -511,7 +542,7 @@ async def send_task_reminder(reminder_row):
             )
         
         moscow_now = get_moscow_now()
-        moscow_now_naive = moscow_now.replace(tzinfo=None)
+        moscow_now_utc = moscow_to_utc(moscow_now)
         
         db = await get_db()
         async with db.pool.acquire() as conn:
@@ -520,7 +551,7 @@ async def send_task_reminder(reminder_row):
                 SET last_sent = $1,
                     send_count = COALESCE(send_count, 0) + 1
                 WHERE id = $2
-            """, moscow_now_naive, reminder_row['reminder_id'])
+            """, moscow_now_utc, reminder_row['reminder_id'])
         
         await schedule_next_task_reminder(growing_id, user_id, task_calendar, task_day)
         
@@ -549,13 +580,13 @@ async def schedule_next_task_reminder(growing_id: int, user_id: int, task_calend
                 if task_day > current_day:
                     started_date = growing_plant['started_date']
                     reminder_date = started_date + timedelta(days=task_day)
-                    reminder_date_naive = reminder_date.replace(tzinfo=None) if reminder_date.tzinfo else reminder_date
+                    reminder_date_utc = moscow_to_utc(reminder_date)
                     
                     await db.create_growing_reminder(
                         growing_id=growing_id,
                         user_id=user_id,
                         reminder_type="task",
-                        next_date=reminder_date_naive,
+                        next_date=reminder_date_utc,
                         stage_number=current_stage + 1,
                         task_day=task_day
                     )
@@ -566,7 +597,7 @@ async def schedule_next_task_reminder(growing_id: int, user_id: int, task_calend
         logger.error(f"Ошибка планирования задачи: {e}")
 
 async def send_watering_reminder(plant_row):
-    """Персональное напоминание с учетом состояния"""
+    """ИСПРАВЛЕНО: Персональное напоминание с учетом состояния"""
     try:
         user_id = plant_row['user_id']
         plant_id = plant_row['id']
@@ -581,7 +612,7 @@ async def send_watering_reminder(plant_row):
         if plant_row['last_watered']:
             last_watered_utc = plant_row['last_watered']
             if last_watered_utc.tzinfo is None:
-                last_watered_utc = pytz.UTC.localize(last_watered_utc)
+                last_watered_utc = UTC_TZ.localize(last_watered_utc)
             last_watered_moscow = last_watered_utc.astimezone(MOSCOW_TZ)
             
             days_ago = (moscow_now.date() - last_watered_moscow.date()).days
@@ -625,17 +656,22 @@ async def send_watering_reminder(plant_row):
             reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
         )
         
-        moscow_now_str = moscow_now.strftime('%Y-%m-%d %H:%M:%S')
+        # ИСПРАВЛЕНО: Правильное сохранение времени отправки
+        moscow_now_utc = moscow_to_utc(moscow_now)
         async with db.pool.acquire() as conn:
+            # Сначала деактивируем старые напоминания
+            await conn.execute("""
+                UPDATE reminders 
+                SET is_active = FALSE 
+                WHERE user_id = $1 AND plant_id = $2 
+                  AND reminder_type = 'watering' AND is_active = TRUE
+            """, user_id, plant_id)
+            
+            # Создаем новое напоминание
             await conn.execute("""
                 INSERT INTO reminders (user_id, plant_id, reminder_type, next_date, last_sent)
-                VALUES ($1, $2, 'watering', $3::timestamp, $3::timestamp)
-                ON CONFLICT (user_id, plant_id, reminder_type) 
-                WHERE is_active = TRUE
-                DO UPDATE SET 
-                    last_sent = $3::timestamp,
-                    send_count = COALESCE(reminders.send_count, 0) + 1
-            """, user_id, plant_id, moscow_now_str)
+                VALUES ($1, $2, 'watering', $3, $3)
+            """, user_id, plant_id, moscow_now_utc)
         
     except Exception as e:
         logger.error(f"Ошибка напоминания: {e}")
@@ -646,13 +682,13 @@ async def create_plant_reminder(plant_id: int, user_id: int, interval_days: int 
         db = await get_db()
         moscow_now = get_moscow_now()
         next_watering = moscow_now + timedelta(days=interval_days)
-        next_watering_naive = next_watering.replace(tzinfo=None)
+        next_watering_utc = moscow_to_utc(next_watering)
         
         await db.create_reminder(
             user_id=user_id,
             plant_id=plant_id,
             reminder_type='watering',
-            next_date=next_watering_naive
+            next_date=next_watering_utc
         )
         
     except Exception as e:
@@ -734,7 +770,6 @@ def extract_personal_watering_info(analysis_text: str) -> dict:
         
         if line.startswith("ПОЛИВ_ИНТЕРВАЛ:"):
             interval_text = line.replace("ПОЛИВ_ИНТЕРВАЛ:", "").strip()
-            import re
             numbers = re.findall(r'\d+', interval_text)
             if numbers:
                 try:
@@ -1294,7 +1329,7 @@ async def plants_command(message: types.Message):
                 if plant.get("last_watered"):
                     last_watered_utc = plant["last_watered"]
                     if last_watered_utc.tzinfo is None:
-                        last_watered_utc = pytz.UTC.localize(last_watered_utc)
+                        last_watered_utc = UTC_TZ.localize(last_watered_utc)
                     last_watered_moscow = last_watered_utc.astimezone(MOSCOW_TZ)
                     
                     days_ago = (moscow_now.date() - last_watered_moscow.date()).days
@@ -1747,6 +1782,9 @@ async def save_plant_callback(callback: types.CallbackQuery):
     
     await callback.answer()
 
+# === ПРОДОЛЖЕНИЕ bot.py ===
+# Эту часть нужно добавить после save_plant_callback
+
 # === CALLBACK ОБРАБОТЧИКИ ===
 
 @dp.callback_query(F.data == "menu")
@@ -1792,7 +1830,7 @@ async def my_plants_callback(callback: types.CallbackQuery):
                 if plant.get("last_watered"):
                     last_watered_utc = plant["last_watered"]
                     if last_watered_utc.tzinfo is None:
-                        last_watered_utc = pytz.UTC.localize(last_watered_utc)
+                        last_watered_utc = UTC_TZ.localize(last_watered_utc)
                     last_watered_moscow = last_watered_utc.astimezone(MOSCOW_TZ)
                     
                     days_ago = (moscow_now.date() - last_watered_moscow.date()).days
@@ -1861,7 +1899,7 @@ async def edit_plant_callback(callback: types.CallbackQuery):
         if plant.get("last_watered"):
             last_watered_utc = plant["last_watered"]
             if last_watered_utc.tzinfo is None:
-                last_watered_utc = pytz.UTC.localize(last_watered_utc)
+                last_watered_utc = UTC_TZ.localize(last_watered_utc)
             last_watered_moscow = last_watered_utc.astimezone(MOSCOW_TZ)
             
             days_ago = (moscow_now.date() - last_watered_moscow.date()).days
@@ -2804,13 +2842,11 @@ async def handle_feedback_message(message: types.Message, state: FSMContext):
         await message.reply("❌ Ошибка обработки")
         await state.clear()
 
-# === ВОПРОСЫ О РАСТЕНИЯХ ===
+# === ВОПРОСЫ О РАСТЕНИЯХ (ИСПРАВЛЕННАЯ ВЕРСИЯ) ===
 
 @dp.message(StateFilter(PlantStates.waiting_question))
 async def handle_question(message: types.Message, state: FSMContext):
-    """Обработка вопросов с полным контекстом растения"""
-    import re
-    
+    """ИСПРАВЛЕНО: Обработка вопросов с правильным экранированием HTML"""
     try:
         logger.info(f"❓ Пользователь {message.from_user.id} задал вопрос")
         
@@ -2859,10 +2895,6 @@ async def handle_question(message: types.Message, state: FSMContext):
 
 Обратите внимание: переувлажнение опаснее недолива.
 
-Пример НЕПРАВИЛЬНОГО (так НЕ делать):
-**Важно**: проверяйте почву *пальцем*
-- используйте __умеренный__ полив
-
 Будьте практичны, конкретны и пишите простым текстом."""
 
                 user_prompt = f"""ИСТОРИЯ РАСТЕНИЯ:
@@ -2884,12 +2916,7 @@ async def handle_question(message: types.Message, state: FSMContext):
                 )
                 answer = response.choices[0].message.content
                 
-                # Логируем оригинальный ответ для отладки
-                logger.info(f"🤖 GPT ответ (первые 200 символов): {answer[:200]}")
-                
-                # Проверяем наличие Markdown форматирования
-                if '**' in answer or '__' in answer or '`' in answer:
-                    logger.warning(f"⚠️ GPT использовал Markdown, очищаем...")
+                logger.info(f"🤖 GPT ответ получен")
                 
                 # Сохраняем взаимодействие
                 if plant_id:
@@ -2905,32 +2932,28 @@ async def handle_question(message: types.Message, state: FSMContext):
         await processing_msg.delete()
         
         if answer and len(answer) > 50:
-            # Очищаем Markdown форматирование от GPT
+            # 1. Очищаем Markdown форматирование
             cleaned_answer = clean_markdown_formatting(answer)
             
-            # Логируем результат очистки
-            if cleaned_answer != answer:
-                logger.info(f"✅ Форматирование очищено: {len(answer)} -> {len(cleaned_answer)} символов")
+            # 2. Экранируем HTML-символы для безопасности
+            cleaned_answer = html.escape(cleaned_answer)
             
-            # Добавляем информацию о контексте
+            # 3. Восстанавливаем разрешенные HTML-теги
+            cleaned_answer = cleaned_answer.replace('&lt;b&gt;', '<b>').replace('&lt;/b&gt;', '</b>')
+            cleaned_answer = cleaned_answer.replace('&lt;i&gt;', '<i>').replace('&lt;/i&gt;', '</i>')
+            
+            # 4. Добавляем информацию о контексте
             if plant_id and context_text:
                 cleaned_answer += "\n\n💡 <i>Ответ учитывает полную историю вашего растения</i>"
             
-            # Финальная проверка: если остались звездочки или другие символы - логируем
-            if '**' in cleaned_answer or '__' in cleaned_answer:
-                logger.error(f"❌ ВНИМАНИЕ: В ответе остались символы форматирования!")
-                logger.error(f"Проблемный фрагмент: {cleaned_answer[:300]}")
-                # Дополнительная агрессивная очистка
-                cleaned_answer = cleaned_answer.replace('**', '').replace('__', '').replace('`', '')
-            
-            # Всегда используем HTML parse mode
+            # 5. Безопасная отправка с HTML parse mode
             try:
                 await message.reply(cleaned_answer, parse_mode="HTML")
             except Exception as e:
                 logger.error(f"❌ Ошибка отправки с HTML: {e}")
-                # Если HTML не работает, убираем все теги и отправляем как plain text
-                plain_answer = re.sub(r'<[^>]+>', '', cleaned_answer)
-                await message.reply(plain_answer)
+                # Fallback - убираем все теги и отправляем plain text
+                plain_text = re.sub(r'<[^>]+>', '', cleaned_answer)
+                await message.reply(plain_text)
         else:
             await message.reply(
                 "🤔 Не могу дать ответ. Попробуйте переформулировать.",
@@ -3103,7 +3126,7 @@ async def health_check(request):
     return web.json_response({
         "status": "healthy", 
         "bot": "Bloom AI", 
-        "version": "4.1 - Clean Formatting"
+        "version": "4.2 - Fixed"
     })
 
 async def main():
@@ -3127,8 +3150,8 @@ async def main():
             site = web.TCPSite(runner, '0.0.0.0', PORT)
             await site.start()
             
-            logger.info(f"🚀 Bloom AI v4.1 запущен на порту {PORT}")
-            logger.info(f"✅ Исправлено форматирование ответов GPT!")
+            logger.info(f"🚀 Bloom AI v4.2 запущен на порту {PORT}")
+            logger.info(f"✅ Все исправления применены!")
             
             try:
                 await asyncio.Future()
