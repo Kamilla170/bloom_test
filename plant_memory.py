@@ -1,6 +1,7 @@
 """
 Plant Memory Manager - Система управления полным контекстом растений
 Обеспечивает долгосрочную память AI по каждому растению
+ИСПРАВЛЕНО: Убраны циклические импорты, исправлена обработка JSON
 """
 
 import logging
@@ -22,7 +23,7 @@ class PlantMemoryManager:
                                 include_problems: bool = True) -> Dict:
         """Построить полный контекст растения"""
         try:
-            # ИСПРАВЛЕНИЕ: Импорт внутри функции во избежание циклических импортов
+            # ИСПРАВЛЕНО: Импорт внутри функции во избежание циклических импортов
             from database import get_db
             
             db = await get_db()
@@ -74,10 +75,14 @@ class PlantMemoryManager:
                 "environment": {}
             }
             
-            # ИСПРАВЛЕНИЕ: Безопасное вычисление дней в коллекции
+            # ИСПРАВЛЕНО: Безопасное вычисление дней в коллекции
             if plant_info.get('saved_date'):
                 try:
-                    context["days_in_collection"] = (datetime.now() - plant_info['saved_date']).days
+                    saved_date = plant_info['saved_date']
+                    if saved_date.tzinfo is not None:
+                        # Конвертируем aware datetime в naive для сравнения
+                        saved_date = saved_date.replace(tzinfo=None)
+                    context["days_in_collection"] = (datetime.now() - saved_date).days
                 except Exception as e:
                     logger.error(f"Ошибка вычисления дней: {e}")
                     context["days_in_collection"] = 0
@@ -203,18 +208,19 @@ class PlantMemoryManager:
         return formatted
     
     def _format_patterns(self, patterns: List[Dict]) -> List[Dict]:
-        """Форматировать паттерны пользователя"""
+        """ИСПРАВЛЕНО: Правильное форматирование паттернов пользователя"""
         formatted = []
         for pattern in patterns:
             try:
-                # ИСПРАВЛЕНИЕ: Правильная обработка JSONB данных
+                # ИСПРАВЛЕНО: Правильная обработка JSONB данных
                 pattern_data = pattern.get('pattern_data')
                 
                 # Если это строка JSON, парсим
                 if isinstance(pattern_data, str):
                     try:
                         pattern_data = json.loads(pattern_data)
-                    except:
+                    except json.JSONDecodeError as e:
+                        logger.error(f"Ошибка парсинга JSON паттерна: {e}")
                         pattern_data = {"raw": pattern_data}
                 
                 # Если None, устанавливаем пустой dict
@@ -248,11 +254,12 @@ class PlantMemoryManager:
             recurring = []
             for ptype, occurrences in problem_counts.items():
                 if len(occurrences) >= 2:
-                    # ИСПРАВЛЕНИЕ: Безопасное получение дат
+                    # ИСПРАВЛЕНО: Безопасное получение дат
                     dates = []
                     for p in occurrences:
-                        if p.get('problem_date'):
-                            dates.append(p['problem_date'])
+                        problem_date = p.get('problem_date')
+                        if problem_date:
+                            dates.append(problem_date)
                     
                     recurring.append({
                         "problem_type": ptype,
@@ -327,12 +334,22 @@ class PlantMemoryManager:
             
             # Полив
             watering = context.get('watering_info', {})
-            if watering.get('last_watered'):
+            last_watered = watering.get('last_watered')
+            if last_watered:
                 try:
-                    days_ago = (datetime.now() - watering['last_watered']).days
-                    lines.append(f"ПОЛИВ: последний {days_ago} дней назад, интервал {watering.get('watering_interval', 5)} дней")
-                except:
+                    # ИСПРАВЛЕНО: Безопасная работа с datetime
+                    if isinstance(last_watered, datetime):
+                        if last_watered.tzinfo is not None:
+                            last_watered = last_watered.replace(tzinfo=None)
+                        days_ago = (datetime.now() - last_watered).days
+                        lines.append(f"ПОЛИВ: последний {days_ago} дней назад, интервал {watering.get('watering_interval', 5)} дней")
+                    else:
+                        lines.append(f"ПОЛИВ: интервал {watering.get('watering_interval', 5)} дней")
+                except Exception as e:
+                    logger.error(f"Ошибка обработки last_watered: {e}")
                     lines.append(f"ПОЛИВ: интервал {watering.get('watering_interval', 5)} дней")
+            else:
+                lines.append(f"ПОЛИВ: интервал {watering.get('watering_interval', 5)} дней")
             lines.append("")
             
             # История состояний (последние 3)
@@ -341,10 +358,16 @@ class PlantMemoryManager:
                 lines.append("ИСТОРИЯ СОСТОЯНИЙ:")
                 for state in state_history[:3]:
                     try:
-                        date_str = state.get('date', datetime.now()).strftime('%d.%m')
+                        state_date = state.get('date')
+                        if isinstance(state_date, datetime):
+                            date_str = state_date.strftime('%d.%m')
+                        else:
+                            date_str = "N/A"
+                        
                         from_state = state.get('from') or 'начало'
                         to_state = state.get('to', 'unknown')
                         lines.append(f"  {date_str}: {from_state} → {to_state}")
+                        
                         if state.get('reason'):
                             lines.append(f"    Причина: {state['reason']}")
                     except Exception as e:
@@ -391,9 +414,15 @@ class PlantMemoryManager:
                 lines.append("ПРЕДЫДУЩИЕ ВОПРОСЫ:")
                 for qa in qa_history[:3]:
                     try:
-                        date_str = qa.get('date', datetime.now()).strftime('%d.%m')
+                        qa_date = qa.get('date')
+                        if isinstance(qa_date, datetime):
+                            date_str = qa_date.strftime('%d.%m')
+                        else:
+                            date_str = "N/A"
+                        
                         question = qa.get('question', '')
                         lines.append(f"  {date_str}: {question}")
+                        
                         if qa.get('action_taken'):
                             lines.append(f"    Действие: {qa['action_taken']}")
                         if qa.get('resolved'):
@@ -481,7 +510,7 @@ async def get_plant_context(plant_id: int, user_id: int, focus: str = "general")
 async def save_interaction(plant_id: int, user_id: int, question: str, answer: str, context_used: dict = None):
     """Сохранить взаимодействие с растением"""
     try:
-        # ИСПРАВЛЕНИЕ: Импорт внутри функции
+        # ИСПРАВЛЕНО: Импорт внутри функции
         from database import get_db
         
         db = await get_db()
