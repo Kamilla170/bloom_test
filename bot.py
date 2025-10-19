@@ -38,13 +38,18 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 PORT = int(os.getenv("PORT", 8000))
 
+# Константы
+MAX_PHOTO_SIZE = 10 * 1024 * 1024  # 10 MB
+
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 scheduler = AsyncIOScheduler(timezone=MOSCOW_TZ)
 
+# ИСПРАВЛЕНО: Добавлена система очистки временных анализов
 temp_analyses = {}
+temp_analyses_timestamps = {}
 
 # РАСШИРЕННЫЙ ПРОМПТ С ОПРЕДЕЛЕНИЕМ СОСТОЯНИЯ
 PLANT_IDENTIFICATION_PROMPT = """
@@ -134,6 +139,7 @@ class FeedbackStates(StatesGroup):
     choosing_type = State()
     writing_message = State()
 
+# ИСПРАВЛЕНО: Добавлены проверки типов и обработка ошибок
 def get_moscow_now():
     """Получить текущее время в московской timezone"""
     return datetime.now(MOSCOW_TZ)
@@ -143,34 +149,50 @@ def get_moscow_date():
     return get_moscow_now().date()
 
 def moscow_to_utc(moscow_datetime):
-    """ИСПРАВЛЕНО: Правильная конвертация московского времени в UTC для БД"""
-    if moscow_datetime.tzinfo is None:
-        # Если datetime naive, считаем что это Москва
-        moscow_datetime = MOSCOW_TZ.localize(moscow_datetime)
-    
-    # Конвертируем в UTC
-    utc_datetime = moscow_datetime.astimezone(UTC_TZ)
-    
-    # Возвращаем naive UTC (для PostgreSQL)
-    return utc_datetime.replace(tzinfo=None)
+    """ИСПРАВЛЕНО: Безопасная конвертация московского времени в UTC для БД"""
+    try:
+        # Проверка типа
+        if not isinstance(moscow_datetime, datetime):
+            logger.error(f"moscow_to_utc: ожидался datetime, получен {type(moscow_datetime)}")
+            return None
+        
+        if moscow_datetime.tzinfo is None:
+            # Если datetime naive, считаем что это Москва
+            moscow_datetime = MOSCOW_TZ.localize(moscow_datetime)
+        
+        # Конвертируем в UTC
+        utc_datetime = moscow_datetime.astimezone(UTC_TZ)
+        
+        # Возвращаем naive UTC (для PostgreSQL)
+        return utc_datetime.replace(tzinfo=None)
+    except Exception as e:
+        logger.error(f"Ошибка moscow_to_utc: {e}")
+        return None
 
 def utc_to_moscow(utc_datetime):
-    """ИСПРАВЛЕНО: Правильная конвертация UTC из БД в московское время"""
-    if utc_datetime.tzinfo is None:
-        # Если datetime naive, считаем что это UTC
-        utc_datetime = UTC_TZ.localize(utc_datetime)
-    
-    # Конвертируем в московское время
-    return utc_datetime.astimezone(MOSCOW_TZ)
+    """ИСПРАВЛЕНО: Безопасная конвертация UTC из БД в московское время"""
+    try:
+        # Проверка типа
+        if not isinstance(utc_datetime, datetime):
+            logger.error(f"utc_to_moscow: ожидался datetime, получен {type(utc_datetime)}")
+            return None
+        
+        if utc_datetime.tzinfo is None:
+            # Если datetime naive, считаем что это UTC
+            utc_datetime = UTC_TZ.localize(utc_datetime)
+        
+        # Конвертируем в московское время
+        return utc_datetime.astimezone(MOSCOW_TZ)
+    except Exception as e:
+        logger.error(f"Ошибка utc_to_moscow: {e}")
+        return None
 
 def clean_markdown_formatting(text: str) -> str:
     """Очистить Markdown и некорректное HTML форматирование из текста"""
     if not text:
         return ""
     
-    # АГРЕССИВНАЯ ОЧИСТКА MARKDOWN
-    
-    # 1. Убираем **жирный текст** (включая многострочный)
+    # 1. Убираем **жирный текст**
     text = re.sub(r'\*\*([^\*]+?)\*\*', r'\1', text)
     text = re.sub(r'__([^_]+?)__', r'\1', text)
     
@@ -178,7 +200,7 @@ def clean_markdown_formatting(text: str) -> str:
     text = re.sub(r'(?<!\*)\*(?!\*)([^\*]+?)\*(?!\*)', r'\1', text)
     text = re.sub(r'(?<!_)_(?!_)([^_]+?)_(?!_)', r'\1', text)
     
-    # 3. Убираем оставшиеся одиночные * и _ (если остались)
+    # 3. Убираем оставшиеся одиночные * и _
     text = re.sub(r'(?<!\w)\*+(?!\w)', '', text)
     text = re.sub(r'(?<!\w)_+(?!\w)', '', text)
     
@@ -194,34 +216,27 @@ def clean_markdown_formatting(text: str) -> str:
     # 7. Убираем > цитаты
     text = re.sub(r'^>\s+', '', text, flags=re.MULTILINE)
     
-    # 8. Нормализуем списки (убираем лишние символы)
+    # 8. Нормализуем списки
     text = re.sub(r'^\s*[-\*]\s+', '• ', text, flags=re.MULTILINE)
     
     # ОЧИСТКА HTML ТЕГОВ
-    
-    # Убираем все HTML теги кроме базовых разрешенных
-    # Разрешенные: <b>, <i>, <u>, <s>, <code>, <pre>
     allowed_tags_pattern = r'</?(?!/?(?:b|i|u|s|code|pre)\b)[^>]+>'
     text = re.sub(allowed_tags_pattern, '', text)
     
-    # Убираем незакрытые теги (например </i> без <i>)
-    # Для каждого тега проверяем баланс
+    # Убираем незакрытые теги
     for tag in ['b', 'i', 'u', 's', 'code', 'pre']:
-        # Подсчет открывающих и закрывающих тегов
         open_tags = re.findall(f'<{tag}>', text)
         close_tags = re.findall(f'</{tag}>', text)
         
-        # Если закрывающих больше - убираем лишние
         if len(close_tags) > len(open_tags):
             diff = len(close_tags) - len(open_tags)
             for _ in range(diff):
-                # Убираем первый встретившийся закрывающий тег
                 text = text.replace(f'</{tag}>', '', 1)
     
     # Убираем множественные пробелы
     text = re.sub(r'  +', ' ', text)
     
-    # Убираем множественные переносы строк (больше 2)
+    # Убираем множественные переносы строк
     text = re.sub(r'\n{3,}', '\n\n', text)
     
     return text.strip()
@@ -324,6 +339,54 @@ def get_state_recommendations(state: str, plant_name: str = "растение") 
     
     return recommendations.get(state, recommendations['healthy'])
 
+# ИСПРАВЛЕНО: Добавлена функция очистки старых временных анализов
+async def cleanup_old_temp_analyses():
+    """Очистка старых временных анализов (старше 1 часа)"""
+    try:
+        now = datetime.now()
+        to_delete = []
+        
+        for user_id, timestamp in temp_analyses_timestamps.items():
+            if (now - timestamp).total_seconds() > 3600:  # 1 час
+                to_delete.append(user_id)
+        
+        for user_id in to_delete:
+            temp_analyses.pop(user_id, None)
+            temp_analyses_timestamps.pop(user_id, None)
+            logger.info(f"🧹 Очищен старый анализ пользователя {user_id}")
+        
+        if to_delete:
+            logger.info(f"🧹 Очищено {len(to_delete)} старых анализов")
+    except Exception as e:
+        logger.error(f"Ошибка очистки temp_analyses: {e}")
+
+# МЕНЮ НАВИГАЦИИ
+def main_menu():
+    keyboard = [
+        [
+            InlineKeyboardButton(text="🌱 Добавить растение", callback_data="add_plant"),
+            InlineKeyboardButton(text="🌿 Вырастить с нуля", callback_data="grow_from_scratch")
+        ],
+        [
+            InlineKeyboardButton(text="📸 Анализ растения", callback_data="analyze"),
+            InlineKeyboardButton(text="❓ Задать вопрос", callback_data="question")
+        ],
+        [
+            InlineKeyboardButton(text="🌿 Мои растения", callback_data="my_plants"),
+            InlineKeyboardButton(text="📊 Статистика", callback_data="stats")
+        ],
+        [
+            InlineKeyboardButton(text="📝 Обратная связь", callback_data="feedback"),
+            InlineKeyboardButton(text="ℹ️ Справка", callback_data="help")
+        ]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+def simple_back_menu():
+    keyboard = [
+        [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu")]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
 # === СИСТЕМА НАПОМИНАНИЙ ===
 
 async def check_and_send_reminders():
@@ -513,9 +576,17 @@ async def send_task_reminder(reminder_row):
             [InlineKeyboardButton(text="📸 Добавить фото", callback_data=f"add_diary_photo_{growing_id}")],
         ]
         
-        # ИСПРАВЛЕНО: Проверка photo_file_id перед отправкой
+        # ИСПРАВЛЕНО: Улучшенная проверка и обработка photo_file_id
         photo_file_id = reminder_row.get('photo_file_id')
-        if photo_file_id and photo_file_id != 'default_growing':
+        
+        is_valid_file_id = (
+            photo_file_id 
+            and isinstance(photo_file_id, str)
+            and len(photo_file_id) > 10
+            and photo_file_id not in ['default_growing', 'placeholder', 'none', 'null']
+        )
+        
+        if is_valid_file_id:
             try:
                 await bot.send_photo(
                     chat_id=user_id,
@@ -524,8 +595,9 @@ async def send_task_reminder(reminder_row):
                     parse_mode="HTML",
                     reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
                 )
+                logger.info(f"📸 Отправлено фото в напоминании для пользователя {user_id}")
             except Exception as e:
-                logger.error(f"Ошибка отправки фото в напоминании: {e}")
+                logger.error(f"Ошибка отправки фото в напоминании (file_id: {photo_file_id[:20]}...): {e}")
                 # Fallback на текстовое сообщение
                 await bot.send_message(
                     chat_id=user_id,
@@ -544,14 +616,15 @@ async def send_task_reminder(reminder_row):
         moscow_now = get_moscow_now()
         moscow_now_utc = moscow_to_utc(moscow_now)
         
-        db = await get_db()
-        async with db.pool.acquire() as conn:
-            await conn.execute("""
-                UPDATE reminders
-                SET last_sent = $1,
-                    send_count = COALESCE(send_count, 0) + 1
-                WHERE id = $2
-            """, moscow_now_utc, reminder_row['reminder_id'])
+        if moscow_now_utc:
+            db = await get_db()
+            async with db.pool.acquire() as conn:
+                await conn.execute("""
+                    UPDATE reminders
+                    SET last_sent = $1,
+                        send_count = COALESCE(send_count, 0) + 1
+                    WHERE id = $2
+                """, moscow_now_utc, reminder_row['reminder_id'])
         
         await schedule_next_task_reminder(growing_id, user_id, task_calendar, task_day)
         
@@ -582,14 +655,15 @@ async def schedule_next_task_reminder(growing_id: int, user_id: int, task_calend
                     reminder_date = started_date + timedelta(days=task_day)
                     reminder_date_utc = moscow_to_utc(reminder_date)
                     
-                    await db.create_growing_reminder(
-                        growing_id=growing_id,
-                        user_id=user_id,
-                        reminder_type="task",
-                        next_date=reminder_date_utc,
-                        stage_number=current_stage + 1,
-                        task_day=task_day
-                    )
+                    if reminder_date_utc:
+                        await db.create_growing_reminder(
+                            growing_id=growing_id,
+                            user_id=user_id,
+                            reminder_type="task",
+                            next_date=reminder_date_utc,
+                            stage_number=current_stage + 1,
+                            task_day=task_day
+                        )
                     
                     return
         
@@ -597,7 +671,7 @@ async def schedule_next_task_reminder(growing_id: int, user_id: int, task_calend
         logger.error(f"Ошибка планирования задачи: {e}")
 
 async def send_watering_reminder(plant_row):
-    """ИСПРАВЛЕНО: Персональное напоминание с учетом состояния"""
+    """ИСПРАВЛЕНО: Персональное напоминание с безопасной отправкой фото"""
     try:
         user_id = plant_row['user_id']
         plant_id = plant_row['id']
@@ -611,15 +685,16 @@ async def send_watering_reminder(plant_row):
         
         if plant_row['last_watered']:
             last_watered_utc = plant_row['last_watered']
-            if last_watered_utc.tzinfo is None:
-                last_watered_utc = UTC_TZ.localize(last_watered_utc)
-            last_watered_moscow = last_watered_utc.astimezone(MOSCOW_TZ)
+            last_watered_moscow = utc_to_moscow(last_watered_utc)
             
-            days_ago = (moscow_now.date() - last_watered_moscow.date()).days
-            if days_ago == 1:
-                time_info = f"Последний полив был вчера"
+            if last_watered_moscow:
+                days_ago = (moscow_now.date() - last_watered_moscow.date()).days
+                if days_ago == 1:
+                    time_info = f"Последний полив был вчера"
+                else:
+                    time_info = f"Последний полив был {days_ago} дней назад"
             else:
-                time_info = f"Последний полив был {days_ago} дней назад"
+                time_info = "Информация о поливе недоступна"
         else:
             time_info = "Растение еще ни разу не поливали"
         
@@ -648,30 +723,61 @@ async def send_watering_reminder(plant_row):
             [InlineKeyboardButton(text="📸 Обновить состояние", callback_data=f"update_state_{plant_id}")],
         ]
         
-        await bot.send_photo(
-            chat_id=user_id,
-            photo=plant_row['photo_file_id'],
-            caption=message_text,
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
+        # ИСПРАВЛЕНО: Безопасная отправка фото с try-except
+        photo_file_id = plant_row.get('photo_file_id')
+        
+        is_valid_file_id = (
+            photo_file_id 
+            and isinstance(photo_file_id, str)
+            and len(photo_file_id) > 10
         )
         
-        # ИСПРАВЛЕНО: Правильное сохранение времени отправки
+        if is_valid_file_id:
+            try:
+                await bot.send_photo(
+                    chat_id=user_id,
+                    photo=photo_file_id,
+                    caption=message_text,
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
+                )
+                logger.info(f"💧 Напоминание с фото отправлено пользователю {user_id}")
+            except Exception as e:
+                logger.error(f"Ошибка отправки фото в напоминании (file_id: {photo_file_id[:20] if photo_file_id else 'None'}...): {e}")
+                # Fallback на текстовое сообщение
+                await bot.send_message(
+                    chat_id=user_id,
+                    text=message_text,
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
+                )
+        else:
+            await bot.send_message(
+                chat_id=user_id,
+                text=message_text,
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
+            )
+        
+        # Сохраняем время отправки напоминания
         moscow_now_utc = moscow_to_utc(moscow_now)
-        async with db.pool.acquire() as conn:
-            # Сначала деактивируем старые напоминания
-            await conn.execute("""
-                UPDATE reminders 
-                SET is_active = FALSE 
-                WHERE user_id = $1 AND plant_id = $2 
-                  AND reminder_type = 'watering' AND is_active = TRUE
-            """, user_id, plant_id)
-            
-            # Создаем новое напоминание
-            await conn.execute("""
-                INSERT INTO reminders (user_id, plant_id, reminder_type, next_date, last_sent)
-                VALUES ($1, $2, 'watering', $3, $3)
-            """, user_id, plant_id, moscow_now_utc)
+        
+        if moscow_now_utc:
+            async with db.pool.acquire() as conn:
+                async with conn.transaction():
+                    # Деактивируем старые напоминания
+                    await conn.execute("""
+                        UPDATE reminders 
+                        SET is_active = FALSE 
+                        WHERE user_id = $1 AND plant_id = $2 
+                          AND reminder_type = 'watering' AND is_active = TRUE
+                    """, user_id, plant_id)
+                    
+                    # Создаем новое напоминание
+                    await conn.execute("""
+                        INSERT INTO reminders (user_id, plant_id, reminder_type, next_date, last_sent)
+                        VALUES ($1, $2, 'watering', $3, $3)
+                    """, user_id, plant_id, moscow_now_utc)
         
     except Exception as e:
         logger.error(f"Ошибка напоминания: {e}")
@@ -684,16 +790,16 @@ async def create_plant_reminder(plant_id: int, user_id: int, interval_days: int 
         next_watering = moscow_now + timedelta(days=interval_days)
         next_watering_utc = moscow_to_utc(next_watering)
         
-        await db.create_reminder(
-            user_id=user_id,
-            plant_id=plant_id,
-            reminder_type='watering',
-            next_date=next_watering_utc
-        )
+        if next_watering_utc:
+            await db.create_reminder(
+                user_id=user_id,
+                plant_id=plant_id,
+                reminder_type='watering',
+                next_date=next_watering_utc
+            )
         
     except Exception as e:
         logger.error(f"Ошибка создания напоминания: {e}")
-
 # === АНАЛИЗ РАСТЕНИЙ С ОПРЕДЕЛЕНИЕМ СОСТОЯНИЯ ===
 
 def extract_plant_state_from_analysis(raw_analysis: str) -> dict:
@@ -717,16 +823,15 @@ def extract_plant_state_from_analysis(raw_analysis: str) -> dict:
         
         if line.startswith("ТЕКУЩЕЕ_СОСТОЯНИЕ:"):
             state_text = line.replace("ТЕКУЩЕЕ_СОСТОЯНИЕ:", "").strip().lower()
-            # Определяем состояние
             if 'flowering' in state_text or 'цветен' in state_text:
                 state_info['current_state'] = 'flowering'
-                state_info['watering_adjustment'] = -2  # Поливать чаще
+                state_info['watering_adjustment'] = -2
             elif 'active_growth' in state_text or 'активн' in state_text:
                 state_info['current_state'] = 'active_growth'
-                state_info['feeding_adjustment'] = 7  # Подкормка раз в неделю
+                state_info['feeding_adjustment'] = 7
             elif 'dormancy' in state_text or 'покой' in state_text:
                 state_info['current_state'] = 'dormancy'
-                state_info['watering_adjustment'] = 5  # Поливать реже
+                state_info['watering_adjustment'] = 5
             elif 'stress' in state_text or 'стресс' in state_text or 'болезн' in state_text:
                 state_info['current_state'] = 'stress'
             elif 'adaptation' in state_text or 'адаптац' in state_text:
@@ -1147,37 +1252,7 @@ def create_default_task_calendar(plant_name: str) -> dict:
             ]
         }
     }
-
-# === МЕНЮ НАВИГАЦИИ ===
-
-def main_menu():
-    keyboard = [
-        [
-            InlineKeyboardButton(text="🌱 Добавить растение", callback_data="add_plant"),
-            InlineKeyboardButton(text="🌿 Вырастить с нуля", callback_data="grow_from_scratch")
-        ],
-        [
-            InlineKeyboardButton(text="📸 Анализ растения", callback_data="analyze"),
-            InlineKeyboardButton(text="❓ Задать вопрос", callback_data="question")
-        ],
-        [
-            InlineKeyboardButton(text="🌿 Мои растения", callback_data="my_plants"),
-            InlineKeyboardButton(text="📊 Статистика", callback_data="stats")
-        ],
-        [
-            InlineKeyboardButton(text="📝 Обратная связь", callback_data="feedback"),
-            InlineKeyboardButton(text="ℹ️ Справка", callback_data="help")
-        ]
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=keyboard)
-
-def simple_back_menu():
-    keyboard = [
-        [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu")]
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=keyboard)
-
-# === ОБРАБОТЧИКИ КОМАНД (РЕГИСТРИРУЮТСЯ ПЕРВЫМИ!) ===
+    # === ОБРАБОТЧИКИ КОМАНД ===
 
 @dp.message(Command("start"))
 async def start_command(message: types.Message):
@@ -1328,17 +1403,18 @@ async def plants_command(message: types.Message):
                 
                 if plant.get("last_watered"):
                     last_watered_utc = plant["last_watered"]
-                    if last_watered_utc.tzinfo is None:
-                        last_watered_utc = UTC_TZ.localize(last_watered_utc)
-                    last_watered_moscow = last_watered_utc.astimezone(MOSCOW_TZ)
+                    last_watered_moscow = utc_to_moscow(last_watered_utc)
                     
-                    days_ago = (moscow_now.date() - last_watered_moscow.date()).days
-                    if days_ago == 0:
-                        water_status = "💧 Сегодня"
-                    elif days_ago == 1:
-                        water_status = "💧 Вчера"
+                    if last_watered_moscow:
+                        days_ago = (moscow_now.date() - last_watered_moscow.date()).days
+                        if days_ago == 0:
+                            water_status = "💧 Сегодня"
+                        elif days_ago == 1:
+                            water_status = "💧 Вчера"
+                        else:
+                            water_status = f"💧 {days_ago}д"
                     else:
-                        water_status = f"💧 {days_ago}д"
+                        water_status = "💧 ?"
                 else:
                     water_status = "🆕 Новое"
                 
@@ -1533,6 +1609,18 @@ async def handle_state_update_photo(message: types.Message, state: FSMContext):
             await state.clear()
             return
         
+        photo = message.photo[-1]
+        
+        # ИСПРАВЛЕНО: Проверка размера фото
+        if photo.file_size and photo.file_size > MAX_PHOTO_SIZE:
+            await message.reply(
+                "❌ <b>Фото слишком большое</b>\n\n"
+                "Максимальный размер: 10 МБ\n"
+                "Сожмите фото и попробуйте снова",
+                parse_mode="HTML"
+            )
+            return
+        
         processing_msg = await message.reply(
             "🔍 <b>Анализирую изменения...</b>\n\n"
             "• Сравниваю с предыдущим фото\n"
@@ -1541,9 +1629,9 @@ async def handle_state_update_photo(message: types.Message, state: FSMContext):
             parse_mode="HTML"
         )
         
-        photo = message.photo[-1]
         file = await bot.get_file(photo.file_id)
         file_data = await bot.download_file(file.file_path)
+        image_bytes = file_data.read()
         
         db = await get_db()
         plant = await db.get_plant_by_id(plant_id, user_id)
@@ -1558,7 +1646,7 @@ async def handle_state_update_photo(message: types.Message, state: FSMContext):
         plant_name = plant['display_name']
         
         result = await analyze_plant_image(
-            file_data.read(), 
+            image_bytes, 
             previous_state=previous_state
         )
         
@@ -1628,10 +1716,23 @@ async def handle_state_update_photo(message: types.Message, state: FSMContext):
         await message.reply("❌ Техническая ошибка")
         await state.clear()
 
+# ИСПРАВЛЕНО: Добавлена проверка размера фото
 @dp.message(F.photo)
 async def handle_photo(message: types.Message):
     """Обработка фотографий - ГЛАВНЫЙ АНАЛИЗ"""
     try:
+        photo = message.photo[-1]
+        
+        # ИСПРАВЛЕНО: Проверка размера фото
+        if photo.file_size and photo.file_size > MAX_PHOTO_SIZE:
+            await message.reply(
+                "❌ <b>Фото слишком большое</b>\n\n"
+                "Максимальный размер: 10 МБ\n"
+                "Сожмите фото и попробуйте снова",
+                parse_mode="HTML"
+            )
+            return
+        
         processing_msg = await message.reply(
             "🔍 <b>Анализирую растение...</b>\n\n"
             "• Определяю вид\n"
@@ -1640,18 +1741,19 @@ async def handle_photo(message: types.Message):
             parse_mode="HTML"
         )
         
-        photo = message.photo[-1]
         file = await bot.get_file(photo.file_id)
         file_data = await bot.download_file(file.file_path)
+        image_bytes = file_data.read()
         
         user_question = message.caption if message.caption else None
-        result = await analyze_plant_image(file_data.read(), user_question)
+        result = await analyze_plant_image(image_bytes, user_question)
         
         await processing_msg.delete()
         
         if result["success"]:
             user_id = message.from_user.id
             
+            # ИСПРАВЛЕНО: Добавлена временная метка для очистки
             temp_analyses[user_id] = {
                 "analysis": result.get("raw_analysis", result["analysis"]),
                 "formatted_analysis": result["analysis"],
@@ -1663,6 +1765,7 @@ async def handle_photo(message: types.Message):
                 "needs_retry": result.get("needs_retry", False),
                 "state_info": result.get("state_info", {})
             }
+            temp_analyses_timestamps[user_id] = datetime.now()
             
             state_info = result.get("state_info", {})
             current_state = state_info.get('current_state', 'healthy')
@@ -1723,11 +1826,9 @@ async def save_plant_callback(callback: types.CallbackQuery):
                 plant_name=analysis_data.get("plant_name", "Неизвестное растение")
             )
             
-            # Устанавливаем интервал полива
             personal_interval = watering_info["interval_days"]
             await db.update_plant_watering_interval(plant_id, personal_interval)
             
-            # Сохраняем состояние растения
             current_state = state_info.get('current_state', 'healthy')
             state_reason = state_info.get('state_reason', 'Первичный анализ AI')
             
@@ -1743,7 +1844,6 @@ async def save_plant_callback(callback: types.CallbackQuery):
                 recommendations=state_info.get('recommendations', '')
             )
             
-            # Сохраняем полный анализ в историю
             await db.save_full_analysis(
                 plant_id=plant_id,
                 user_id=user_id,
@@ -1756,10 +1856,11 @@ async def save_plant_callback(callback: types.CallbackQuery):
                 lighting_advice=None
             )
             
-            # Создаем напоминание
             await create_plant_reminder(plant_id, user_id, personal_interval)
             
+            # ИСПРАВЛЕНО: Очищаем временные данные при сохранении
             del temp_analyses[user_id]
+            temp_analyses_timestamps.pop(user_id, None)
             
             plant_name = analysis_data.get("plant_name", "растение")
             state_emoji = STATE_EMOJI.get(current_state, '🌱')
@@ -1781,11 +1882,7 @@ async def save_plant_callback(callback: types.CallbackQuery):
         await callback.message.answer("❌ Нет данных. Сначала проанализируйте растение")
     
     await callback.answer()
-
-# === ПРОДОЛЖЕНИЕ bot.py ===
-# Эту часть нужно добавить после save_plant_callback
-
-# === CALLBACK ОБРАБОТЧИКИ ===
+    # === CALLBACK ОБРАБОТЧИКИ ===
 
 @dp.callback_query(F.data == "menu")
 async def menu_callback(callback: types.CallbackQuery):
@@ -1819,8 +1916,7 @@ async def my_plants_callback(callback: types.CallbackQuery):
             
             if plant.get('type') == 'growing':
                 stage_info = plant.get('stage_info', 'В процессе')
-                text += f"{i}. 🌱 <b>{plant_name}</b>\n"
-                text += f"   {stage_info}\n\n"
+                text += f"{i}. 🌱 <b>{plant_name}</b>\n   {stage_info}\n\n"
             else:
                 current_state = plant.get('current_state', 'healthy')
                 state_emoji = STATE_EMOJI.get(current_state, '🌱')
@@ -1829,22 +1925,22 @@ async def my_plants_callback(callback: types.CallbackQuery):
                 
                 if plant.get("last_watered"):
                     last_watered_utc = plant["last_watered"]
-                    if last_watered_utc.tzinfo is None:
-                        last_watered_utc = UTC_TZ.localize(last_watered_utc)
-                    last_watered_moscow = last_watered_utc.astimezone(MOSCOW_TZ)
+                    last_watered_moscow = utc_to_moscow(last_watered_utc)
                     
-                    days_ago = (moscow_now.date() - last_watered_moscow.date()).days
-                    if days_ago == 0:
-                        water_status = "💧 Сегодня"
-                    elif days_ago == 1:
-                        water_status = "💧 Вчера"
+                    if last_watered_moscow:
+                        days_ago = (moscow_now.date() - last_watered_moscow.date()).days
+                        if days_ago == 0:
+                            water_status = "💧 Сегодня"
+                        elif days_ago == 1:
+                            water_status = "💧 Вчера"
+                        else:
+                            water_status = f"💧 {days_ago}д"
                     else:
-                        water_status = f"💧 {days_ago}д"
+                        water_status = "💧 ?"
                 else:
                     water_status = "🆕 Новое"
                 
-                text += f"{i}. {state_emoji} <b>{plant_name}</b>\n"
-                text += f"   {water_status}\n\n"
+                text += f"{i}. {state_emoji} <b>{plant_name}</b>\n   {water_status}\n\n"
             
             short_name = plant_name[:15] + "..." if len(plant_name) > 15 else plant_name
             
@@ -1898,17 +1994,18 @@ async def edit_plant_callback(callback: types.CallbackQuery):
         moscow_now = get_moscow_now()
         if plant.get("last_watered"):
             last_watered_utc = plant["last_watered"]
-            if last_watered_utc.tzinfo is None:
-                last_watered_utc = UTC_TZ.localize(last_watered_utc)
-            last_watered_moscow = last_watered_utc.astimezone(MOSCOW_TZ)
+            last_watered_moscow = utc_to_moscow(last_watered_utc)
             
-            days_ago = (moscow_now.date() - last_watered_moscow.date()).days
-            if days_ago == 0:
-                water_status = "💧 Полито сегодня"
-            elif days_ago == 1:
-                water_status = "💧 Полито вчера"
+            if last_watered_moscow:
+                days_ago = (moscow_now.date() - last_watered_moscow.date()).days
+                if days_ago == 0:
+                    water_status = "💧 Полито сегодня"
+                elif days_ago == 1:
+                    water_status = "💧 Полито вчера"
+                else:
+                    water_status = f"💧 Полито {days_ago} дней назад"
             else:
-                water_status = f"💧 Полито {days_ago} дней назад"
+                water_status = "💧 Информация недоступна"
         else:
             water_status = "🆕 Еще не поливали"
         
@@ -1936,126 +2033,6 @@ async def edit_plant_callback(callback: types.CallbackQuery):
         
     except Exception as e:
         logger.error(f"Ошибка меню: {e}")
-        await callback.answer("❌ Ошибка", show_alert=True)
-    
-    await callback.answer()
-
-@dp.callback_query(F.data.startswith("edit_growing_"))
-async def edit_growing_callback(callback: types.CallbackQuery):
-    """Меню редактирования выращиваемого растения"""
-    try:
-        growing_id = int(callback.data.split("_")[-1])
-        user_id = callback.from_user.id
-        
-        db = await get_db()
-        growing_plant = await db.get_growing_plant_by_id(growing_id, user_id)
-        
-        if not growing_plant:
-            await callback.answer("❌ Растение не найдено", show_alert=True)
-            return
-        
-        plant_name = growing_plant['plant_name']
-        current_stage = growing_plant['current_stage']
-        total_stages = growing_plant['total_stages']
-        status = growing_plant['status']
-        started_date = growing_plant['started_date']
-        
-        days_growing = (get_moscow_now().date() - started_date.date()).days
-        
-        stage_name = growing_plant.get('current_stage_name', f'Этап {current_stage + 1}')
-        
-        keyboard = [
-            [InlineKeyboardButton(text="📸 Добавить фото прогресса", callback_data=f"add_diary_photo_{growing_id}")],
-            [InlineKeyboardButton(text="📖 Просмотреть дневник", callback_data=f"view_diary_{growing_id}")],
-            [InlineKeyboardButton(text="✏️ Изменить название", callback_data=f"rename_growing_{growing_id}")],
-            [InlineKeyboardButton(text="🗑️ Удалить", callback_data=f"delete_growing_{growing_id}")],
-            [InlineKeyboardButton(text="🌿 К коллекции", callback_data="my_plants")],
-        ]
-        
-        await callback.message.answer(
-            f"⚙️ <b>Управление выращиванием</b>\n\n"
-            f"🌱 <b>{plant_name}</b>\n"
-            f"📅 День {days_growing} выращивания\n"
-            f"📊 Этап: {current_stage}/{total_stages}\n"
-            f"🏷️ {stage_name}\n"
-            f"⚡ Статус: {status}\n\n"
-            f"Выберите действие:",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
-        )
-        
-    except Exception as e:
-        logger.error(f"Ошибка меню выращивания: {e}")
-        await callback.answer("❌ Ошибка", show_alert=True)
-    
-    await callback.answer()
-
-@dp.callback_query(F.data.startswith("delete_growing_"))
-async def delete_growing_callback(callback: types.CallbackQuery):
-    """Удаление выращиваемого растения"""
-    try:
-        growing_id = int(callback.data.split("_")[-1])
-        user_id = callback.from_user.id
-        
-        db = await get_db()
-        growing_plant = await db.get_growing_plant_by_id(growing_id, user_id)
-        
-        if not growing_plant:
-            await callback.answer("❌ Растение не найдено", show_alert=True)
-            return
-        
-        plant_name = growing_plant['plant_name']
-        
-        keyboard = [
-            [InlineKeyboardButton(text="❌ Да, удалить", callback_data=f"confirm_delete_growing_{growing_id}")],
-            [InlineKeyboardButton(text="🔙 Отмена", callback_data=f"edit_growing_{growing_id}")],
-        ]
-        
-        await callback.message.answer(
-            f"🗑️ <b>Удаление выращивания</b>\n\n"
-            f"🌱 {plant_name}\n\n"
-            f"⚠️ Это действие нельзя отменить\n\n"
-            f"❓ Вы уверены?",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
-        )
-        
-    except Exception as e:
-        logger.error(f"Ошибка удаления: {e}")
-        await callback.answer("❌ Ошибка", show_alert=True)
-    
-    await callback.answer()
-
-@dp.callback_query(F.data.startswith("confirm_delete_growing_"))
-async def confirm_delete_growing_callback(callback: types.CallbackQuery):
-    """Подтверждение удаления выращиваемого растения"""
-    try:
-        growing_id = int(callback.data.split("_")[-1])
-        user_id = callback.from_user.id
-        
-        db = await get_db()
-        growing_plant = await db.get_growing_plant_by_id(growing_id, user_id)
-        
-        if growing_plant:
-            plant_name = growing_plant['plant_name']
-            
-            async with db.pool.acquire() as conn:
-                await conn.execute("""
-                    DELETE FROM growing_plants
-                    WHERE id = $1 AND user_id = $2
-                """, growing_id, user_id)
-            
-            await callback.message.answer(
-                f"🗑️ <b>Выращивание удалено</b>\n\n"
-                f"❌ {plant_name} удалено из коллекции",
-                parse_mode="HTML",
-                reply_markup=simple_back_menu()
-            )
-        else:
-            await callback.answer("❌ Растение не найдено", show_alert=True)
-        
-    except Exception as e:
-        logger.error(f"Ошибка удаления: {e}")
         await callback.answer("❌ Ошибка", show_alert=True)
     
     await callback.answer()
@@ -2634,7 +2611,6 @@ async def mark_onboarding_completed(user_id: int):
             )
     except Exception as e:
         logger.error(f"Ошибка онбординга: {e}")
-
 # === ВЫРАЩИВАНИЕ РАСТЕНИЙ ===
 
 @dp.callback_query(F.data == "grow_from_scratch")
@@ -2756,6 +2732,312 @@ async def confirm_growing_plan_callback(callback: types.CallbackQuery, state: FS
     
     await callback.answer()
 
+@dp.callback_query(F.data.startswith("edit_growing_"))
+async def edit_growing_callback(callback: types.CallbackQuery):
+    """Меню редактирования выращиваемого растения"""
+    try:
+        growing_id = int(callback.data.split("_")[-1])
+        user_id = callback.from_user.id
+        
+        db = await get_db()
+        growing_plant = await db.get_growing_plant_by_id(growing_id, user_id)
+        
+        if not growing_plant:
+            await callback.answer("❌ Растение не найдено", show_alert=True)
+            return
+        
+        plant_name = growing_plant['plant_name']
+        current_stage = growing_plant['current_stage']
+        total_stages = growing_plant['total_stages']
+        status = growing_plant['status']
+        started_date = growing_plant['started_date']
+        
+        days_growing = (get_moscow_now().date() - started_date.date()).days
+        
+        stage_name = growing_plant.get('current_stage_name', f'Этап {current_stage + 1}')
+        
+        keyboard = [
+            [InlineKeyboardButton(text="📸 Добавить фото прогресса", callback_data=f"add_diary_photo_{growing_id}")],
+            [InlineKeyboardButton(text="📖 Просмотреть дневник", callback_data=f"view_diary_{growing_id}")],
+            [InlineKeyboardButton(text="✏️ Изменить название", callback_data=f"rename_growing_{growing_id}")],
+            [InlineKeyboardButton(text="🗑️ Удалить", callback_data=f"delete_growing_{growing_id}")],
+            [InlineKeyboardButton(text="🌿 К коллекции", callback_data="my_plants")],
+        ]
+        
+        await callback.message.answer(
+            f"⚙️ <b>Управление выращиванием</b>\n\n"
+            f"🌱 <b>{plant_name}</b>\n"
+            f"📅 День {days_growing} выращивания\n"
+            f"📊 Этап: {current_stage}/{total_stages}\n"
+            f"🏷️ {stage_name}\n"
+            f"⚡ Статус: {status}\n\n"
+            f"Выберите действие:",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
+        )
+        
+    except Exception as e:
+        logger.error(f"Ошибка меню выращивания: {e}")
+        await callback.answer("❌ Ошибка", show_alert=True)
+    
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("delete_growing_"))
+async def delete_growing_callback(callback: types.CallbackQuery):
+    """Удаление выращиваемого растения"""
+    try:
+        growing_id = int(callback.data.split("_")[-1])
+        user_id = callback.from_user.id
+        
+        db = await get_db()
+        growing_plant = await db.get_growing_plant_by_id(growing_id, user_id)
+        
+        if not growing_plant:
+            await callback.answer("❌ Растение не найдено", show_alert=True)
+            return
+        
+        plant_name = growing_plant['plant_name']
+        
+        keyboard = [
+            [InlineKeyboardButton(text="❌ Да, удалить", callback_data=f"confirm_delete_growing_{growing_id}")],
+            [InlineKeyboardButton(text="🔙 Отмена", callback_data=f"edit_growing_{growing_id}")],
+        ]
+        
+        await callback.message.answer(
+            f"🗑️ <b>Удаление выращивания</b>\n\n"
+            f"🌱 {plant_name}\n\n"
+            f"⚠️ Это действие нельзя отменить\n\n"
+            f"❓ Вы уверены?",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
+        )
+        
+    except Exception as e:
+        logger.error(f"Ошибка удаления: {e}")
+        await callback.answer("❌ Ошибка", show_alert=True)
+    
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("confirm_delete_growing_"))
+async def confirm_delete_growing_callback(callback: types.CallbackQuery):
+    """Подтверждение удаления выращиваемого растения"""
+    try:
+        growing_id = int(callback.data.split("_")[-1])
+        user_id = callback.from_user.id
+        
+        db = await get_db()
+        growing_plant = await db.get_growing_plant_by_id(growing_id, user_id)
+        
+        if growing_plant:
+            plant_name = growing_plant['plant_name']
+            
+            async with db.pool.acquire() as conn:
+                await conn.execute("""
+                    DELETE FROM growing_plants
+                    WHERE id = $1 AND user_id = $2
+                """, growing_id, user_id)
+            
+            await callback.message.answer(
+                f"🗑️ <b>Выращивание удалено</b>\n\n"
+                f"❌ {plant_name} удалено из коллекции",
+                parse_mode="HTML",
+                reply_markup=simple_back_menu()
+            )
+        else:
+            await callback.answer("❌ Растение не найдено", show_alert=True)
+        
+    except Exception as e:
+        logger.error(f"Ошибка удаления: {e}")
+        await callback.answer("❌ Ошибка", show_alert=True)
+    
+    await callback.answer()
+
+# ИСПРАВЛЕНО: Обработчики для выращивания
+
+@dp.callback_query(F.data.startswith("task_done_"))
+async def task_done_callback(callback: types.CallbackQuery):
+    """Отметить задачу выполненной"""
+    try:
+        parts = callback.data.split("_")
+        growing_id = int(parts[2])
+        task_day = int(parts[3])
+        user_id = callback.from_user.id
+        
+        db = await get_db()
+        growing_plant = await db.get_growing_plant_by_id(growing_id, user_id)
+        
+        if not growing_plant:
+            await callback.answer("❌ Растение не найдено", show_alert=True)
+            return
+        
+        async with db.pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO growth_diary (growing_plant_id, user_id, entry_type, description, stage_number)
+                VALUES ($1, $2, 'task_completed', $3, $4)
+            """, growing_id, user_id, f"Выполнена задача дня {task_day}", growing_plant['current_stage'])
+        
+        plant_name = growing_plant['plant_name']
+        
+        await callback.message.edit_caption(
+            caption=callback.message.caption + f"\n\n✅ <b>Выполнено!</b> ({get_moscow_now().strftime('%d.%m %H:%M')})",
+            parse_mode="HTML"
+        )
+        
+        await callback.answer(f"✅ Задача отмечена для {plant_name}!")
+        
+    except Exception as e:
+        logger.error(f"Ошибка task_done: {e}")
+        await callback.answer("❌ Ошибка", show_alert=True)
+    
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("add_diary_photo_"))
+async def add_diary_photo_callback(callback: types.CallbackQuery, state: FSMContext):
+    """Добавить фото в дневник выращивания"""
+    try:
+        growing_id = int(callback.data.split("_")[-1])
+        user_id = callback.from_user.id
+        
+        db = await get_db()
+        growing_plant = await db.get_growing_plant_by_id(growing_id, user_id)
+        
+        if not growing_plant:
+            await callback.answer("❌ Растение не найдено", show_alert=True)
+            return
+        
+        await state.update_data(diary_growing_id=growing_id)
+        await state.set_state(PlantStates.adding_diary_entry)
+        
+        plant_name = growing_plant['plant_name']
+        
+        await callback.message.answer(
+            f"📸 <b>Добавление фото прогресса</b>\n\n"
+            f"🌱 {plant_name}\n\n"
+            f"Пришлите фото текущего состояния растения:",
+            parse_mode="HTML"
+        )
+        
+    except Exception as e:
+        logger.error(f"Ошибка add_diary_photo: {e}")
+        await callback.answer("❌ Ошибка", show_alert=True)
+    
+    await callback.answer()
+
+@dp.message(StateFilter(PlantStates.adding_diary_entry), F.photo)
+async def handle_diary_photo(message: types.Message, state: FSMContext):
+    """Обработка фото для дневника выращивания"""
+    try:
+        data = await state.get_data()
+        growing_id = data.get('diary_growing_id')
+        
+        if not growing_id:
+            await message.reply("❌ Ошибка: данные потеряны")
+            await state.clear()
+            return
+        
+        user_id = message.from_user.id
+        photo = message.photo[-1]
+        description = message.caption if message.caption else "Фото прогресса"
+        
+        db = await get_db()
+        growing_plant = await db.get_growing_plant_by_id(growing_id, user_id)
+        
+        if not growing_plant:
+            await message.reply("❌ Растение не найдено")
+            await state.clear()
+            return
+        
+        async with db.pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO growth_diary 
+                (growing_plant_id, user_id, entry_type, description, photo_file_id, stage_number)
+                VALUES ($1, $2, 'photo', $3, $4, $5)
+            """, growing_id, user_id, description, photo.file_id, growing_plant['current_stage'])
+            
+            await conn.execute("""
+                UPDATE growing_plants
+                SET photo_file_id = $1
+                WHERE id = $2
+            """, photo.file_id, growing_id)
+        
+        plant_name = growing_plant['plant_name']
+        
+        await message.reply(
+            f"✅ <b>Фото добавлено!</b>\n\n"
+            f"🌱 {plant_name}\n"
+            f"📸 Сохранено в дневник выращивания",
+            parse_mode="HTML",
+            reply_markup=simple_back_menu()
+        )
+        
+        await state.clear()
+        
+    except Exception as e:
+        logger.error(f"Ошибка сохранения фото дневника: {e}")
+        await message.reply("❌ Ошибка сохранения")
+        await state.clear()
+
+@dp.callback_query(F.data.startswith("view_diary_"))
+async def view_diary_callback(callback: types.CallbackQuery):
+    """Просмотр дневника выращивания"""
+    try:
+        growing_id = int(callback.data.split("_")[-1])
+        user_id = callback.from_user.id
+        
+        db = await get_db()
+        growing_plant = await db.get_growing_plant_by_id(growing_id, user_id)
+        
+        if not growing_plant:
+            await callback.answer("❌ Растение не найдено", show_alert=True)
+            return
+        
+        async with db.pool.acquire() as conn:
+            diary_entries = await conn.fetch("""
+                SELECT * FROM growth_diary
+                WHERE growing_plant_id = $1
+                ORDER BY entry_date DESC
+                LIMIT 10
+            """, growing_id)
+        
+        plant_name = growing_plant['plant_name']
+        text = f"📖 <b>Дневник: {plant_name}</b>\n\n"
+        
+        if diary_entries:
+            for entry in diary_entries:
+                entry_date = entry['entry_date'].strftime('%d.%m %H:%M')
+                entry_type = entry['entry_type']
+                
+                if entry_type == 'started':
+                    icon = "🌱"
+                elif entry_type == 'photo':
+                    icon = "📸"
+                elif entry_type == 'task_completed':
+                    icon = "✅"
+                else:
+                    icon = "📝"
+                
+                text += f"{icon} <b>{entry_date}</b>\n"
+                text += f"   {entry['description']}\n\n"
+        else:
+            text += "📝 Дневник пуст\n\nДобавьте первую запись!"
+        
+        keyboard = [
+            [InlineKeyboardButton(text="📸 Добавить фото", callback_data=f"add_diary_photo_{growing_id}")],
+            [InlineKeyboardButton(text="🌿 К растению", callback_data=f"edit_growing_{growing_id}")],
+        ]
+        
+        await callback.message.answer(
+            text,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
+        )
+        
+    except Exception as e:
+        logger.error(f"Ошибка просмотра дневника: {e}")
+        await callback.answer("❌ Ошибка", show_alert=True)
+    
+    await callback.answer()
+
 # === ОБРАТНАЯ СВЯЗЬ ===
 
 @dp.callback_query(F.data == "feedback")
@@ -2842,7 +3124,7 @@ async def handle_feedback_message(message: types.Message, state: FSMContext):
         await message.reply("❌ Ошибка обработки")
         await state.clear()
 
-# === ВОПРОСЫ О РАСТЕНИЯХ (ИСПРАВЛЕННАЯ ВЕРСИЯ) ===
+# === ВОПРОСЫ О РАСТЕНИЯХ ===
 
 @dp.message(StateFilter(PlantStates.waiting_question))
 async def handle_question(message: types.Message, state: FSMContext):
@@ -2886,15 +3168,6 @@ async def handle_question(message: types.Message, state: FSMContext):
 - НЕ ИСПОЛЬЗУЙТЕ подчеркивания (_) для форматирования
 - Пишите как в обычном письме без специального форматирования
 
-Пример ПРАВИЛЬНОГО ответа:
-Для правильного полива денежного дерева:
-
-1. Проверяйте почву пальцем - она должна просохнуть на 2-3 см
-2. Поливайте умеренно раз в 7-10 дней
-3. Зимой поливайте реже
-
-Обратите внимание: переувлажнение опаснее недолива.
-
 Будьте практичны, конкретны и пишите простым текстом."""
 
                 user_prompt = f"""ИСТОРИЯ РАСТЕНИЯ:
@@ -2916,9 +3189,6 @@ async def handle_question(message: types.Message, state: FSMContext):
                 )
                 answer = response.choices[0].message.content
                 
-                logger.info(f"🤖 GPT ответ получен")
-                
-                # Сохраняем взаимодействие
                 if plant_id:
                     await save_interaction(
                         plant_id, user_id, message.text, answer,
@@ -2932,26 +3202,18 @@ async def handle_question(message: types.Message, state: FSMContext):
         await processing_msg.delete()
         
         if answer and len(answer) > 50:
-            # 1. Очищаем Markdown форматирование
             cleaned_answer = clean_markdown_formatting(answer)
-            
-            # 2. Экранируем HTML-символы для безопасности
             cleaned_answer = html.escape(cleaned_answer)
-            
-            # 3. Восстанавливаем разрешенные HTML-теги
             cleaned_answer = cleaned_answer.replace('&lt;b&gt;', '<b>').replace('&lt;/b&gt;', '</b>')
             cleaned_answer = cleaned_answer.replace('&lt;i&gt;', '<i>').replace('&lt;/i&gt;', '</i>')
             
-            # 4. Добавляем информацию о контексте
             if plant_id and context_text:
                 cleaned_answer += "\n\n💡 <i>Ответ учитывает полную историю вашего растения</i>"
             
-            # 5. Безопасная отправка с HTML parse mode
             try:
                 await message.reply(cleaned_answer, parse_mode="HTML")
             except Exception as e:
                 logger.error(f"❌ Ошибка отправки с HTML: {e}")
-                # Fallback - убираем все теги и отправляем plain text
                 plain_text = re.sub(r'<[^>]+>', '', cleaned_answer)
                 await message.reply(plain_text)
         else:
@@ -3003,7 +3265,7 @@ async def ask_about_plant_callback(callback: types.CallbackQuery, state: FSMCont
     
     await callback.answer()
 
-# === ДИАГНОСТИЧЕСКИЙ ОБРАБОТЧИК (ДОЛЖЕН БЫТЬ В САМОМ КОНЦЕ!) ===
+# === ДИАГНОСТИЧЕСКИЙ ОБРАБОТЧИК ===
 
 @dp.message()
 async def catch_all_messages(message: types.Message):
@@ -3037,6 +3299,15 @@ async def catch_all_messages(message: types.Message):
 async def on_startup():
     """Инициализация"""
     try:
+        # ИСПРАВЛЕНО: Валидация обязательных переменных
+        if not BOT_TOKEN:
+            logger.error("❌ BOT_TOKEN не установлен!")
+            raise ValueError("BOT_TOKEN is required")
+        
+        if not OPENAI_API_KEY:
+            logger.error("❌ OPENAI_API_KEY не установлен!")
+            logger.warning("⚠️ Бот будет работать без AI анализа")
+        
         await init_database()
         logger.info("✅ База данных инициализирована")
         
@@ -3067,10 +3338,20 @@ async def on_startup():
             replace_existing=True
         )
         
+        # ИСПРАВЛЕНО: Добавлена очистка временных анализов
+        scheduler.add_job(
+            cleanup_old_temp_analyses,
+            'interval',
+            minutes=30,
+            id='cleanup_temp',
+            replace_existing=True
+        )
+        
         scheduler.start()
         logger.info("🔔 Планировщик запущен")
         logger.info("⏰ Ежедневные напоминания: 9:00 МСК")
         logger.info("📸 Месячные напоминания: 10:00 МСК")
+        logger.info("🧹 Очистка temp_analyses: каждые 30 минут")
         
         if WEBHOOK_URL:
             await bot.set_webhook(f"{WEBHOOK_URL}/webhook")
@@ -3126,13 +3407,13 @@ async def health_check(request):
     return web.json_response({
         "status": "healthy", 
         "bot": "Bloom AI", 
-        "version": "4.2 - Fixed"
+        "version": "4.3 - All Fixed"
     })
 
 async def main():
     """Main функция"""
     try:
-        logger.info("🚀 Запуск Bloom AI...")
+        logger.info("🚀 Запуск Bloom AI v4.3 (ИСПРАВЛЕННАЯ ВЕРСИЯ)...")
         logger.info(f"🔑 BOT_TOKEN: {'✅ Установлен' if BOT_TOKEN else '❌ Отсутствует'}")
         logger.info(f"🔑 OPENAI_API_KEY: {'✅ Установлен' if OPENAI_API_KEY else '❌ Отсутствует'}")
         logger.info(f"🌐 WEBHOOK_URL: {WEBHOOK_URL if WEBHOOK_URL else '❌ Не установлен (polling режим)'}")
@@ -3150,8 +3431,15 @@ async def main():
             site = web.TCPSite(runner, '0.0.0.0', PORT)
             await site.start()
             
-            logger.info(f"🚀 Bloom AI v4.2 запущен на порту {PORT}")
-            logger.info(f"✅ Все исправления применены!")
+            logger.info(f"🚀 Bloom AI v4.3 запущен на порту {PORT}")
+            logger.info(f"✅ ВСЕ ИСПРАВЛЕНИЯ ПРИМЕНЕНЫ:")
+            logger.info(f"   ✓ Memory leak temp_analyses исправлен")
+            logger.info(f"   ✓ Проверка размера фото добавлена")
+            logger.info(f"   ✓ Безопасная отправка фото с try-except")
+            logger.info(f"   ✓ Правильная конвертация timezone")
+            logger.info(f"   ✓ Валидация ENV переменных")
+            logger.info(f"   ✓ Обработчики для выращивания добавлены")
+            logger.info(f"   ✓ Транзакции для напоминаний")
             
             try:
                 await asyncio.Future()
