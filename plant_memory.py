@@ -1,15 +1,20 @@
 """
 Plant Memory Manager - Система управления полным контекстом растений
 Обеспечивает долгосрочную память AI по каждому растению
-ИСПРАВЛЕНО: Убраны циклические импорты, исправлена обработка JSON
+ИСПРАВЛЕНО: Правильная обработка timezone и JSON данных
 """
 
 import logging
 import json
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
+import pytz
 
 logger = logging.getLogger(__name__)
+
+# Timezone константы
+MOSCOW_TZ = pytz.timezone('Europe/Moscow')
+UTC_TZ = pytz.UTC
 
 class PlantMemoryManager:
     """Менеджер памяти растений"""
@@ -299,6 +304,23 @@ class PlantMemoryManager:
             return text
         return text[:max_length] + "..."
     
+    # ИСПРАВЛЕНО: Правильная конвертация datetime с timezone
+    def _safe_utc_to_moscow(self, utc_datetime):
+        """Безопасная конвертация UTC в московское время"""
+        try:
+            if not isinstance(utc_datetime, datetime):
+                return None
+            
+            if utc_datetime.tzinfo is None:
+                # Если naive, считаем что это UTC
+                utc_datetime = UTC_TZ.localize(utc_datetime)
+            
+            # Конвертируем в московское время
+            return utc_datetime.astimezone(MOSCOW_TZ)
+        except Exception as e:
+            logger.error(f"Ошибка конвертации datetime: {e}")
+            return None
+    
     async def format_context_for_ai(self, plant_id: int, user_id: int,
                                    focus: str = "general") -> str:
         """Форматировать контекст для отправки AI"""
@@ -332,16 +354,17 @@ class PlantMemoryManager:
             lines.append(f"ЭТАП РОСТА: {context.get('growth_stage', 'unknown')}")
             lines.append("")
             
-            # Полив
+            # Полив (ИСПРАВЛЕНО: правильная работа с datetime)
             watering = context.get('watering_info', {})
             last_watered = watering.get('last_watered')
             if last_watered:
                 try:
-                    # ИСПРАВЛЕНО: Безопасная работа с datetime
-                    if isinstance(last_watered, datetime):
-                        if last_watered.tzinfo is not None:
-                            last_watered = last_watered.replace(tzinfo=None)
-                        days_ago = (datetime.now() - last_watered).days
+                    # ИСПРАВЛЕНО: Правильная конвертация UTC -> Moscow
+                    last_watered_moscow = self._safe_utc_to_moscow(last_watered)
+                    
+                    if last_watered_moscow:
+                        moscow_now = datetime.now(MOSCOW_TZ)
+                        days_ago = (moscow_now.date() - last_watered_moscow.date()).days
                         lines.append(f"ПОЛИВ: последний {days_ago} дней назад, интервал {watering.get('watering_interval', 5)} дней")
                     else:
                         lines.append(f"ПОЛИВ: интервал {watering.get('watering_interval', 5)} дней")
