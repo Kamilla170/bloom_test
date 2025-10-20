@@ -2,6 +2,7 @@ import asyncio
 import os
 import logging
 from datetime import datetime, timedelta
+from collections import defaultdict
 import json
 import base64
 from io import BytesIO
@@ -36,10 +37,12 @@ UTC_TZ = pytz.UTC
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+DATABASE_URL = os.getenv("DATABASE_URL")
 PORT = int(os.getenv("PORT", 8000))
 
-# Константы
-MAX_PHOTO_SIZE = 10 * 1024 * 1024  # 10 MB
+# ИСПРАВЛЕНО: Увеличен размер и добавлена валидация
+MAX_PHOTO_SIZE = 20 * 1024 * 1024  # 20 MB (лимит Telegram)
+MAX_INPUT_LENGTH = 100  # Максимальная длина названий
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
@@ -47,11 +50,12 @@ openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 scheduler = AsyncIOScheduler(timezone=MOSCOW_TZ)
 
-# ИСПРАВЛЕНО: Добавлена система очистки временных анализов
+# Временные анализы и rate limiting
 temp_analyses = {}
 temp_analyses_timestamps = {}
+user_request_times = defaultdict(list)
 
-# РАСШИРЕННЫЙ ПРОМПТ С ОПРЕДЕЛЕНИЕМ СОСТОЯНИЯ
+# РАСШИРЕННЫЙ ПРОМПТ
 PLANT_IDENTIFICATION_PROMPT = """
 Вы - эксперт-ботаник. Внимательно изучите фотографию растения и дайте максимально точную идентификацию.
 
@@ -139,7 +143,21 @@ class FeedbackStates(StatesGroup):
     choosing_type = State()
     writing_message = State()
 
-# ИСПРАВЛЕНО: Добавлены проверки типов и обработка ошибок
+# ИСПРАВЛЕНО: Rate limiting
+async def check_rate_limit(user_id: int, limit: int = 10, window: int = 60) -> bool:
+    """Проверка лимита запросов: limit запросов за window секунд"""
+    now = datetime.now()
+    user_times = user_request_times[user_id]
+    
+    # Удаляем старые запросы
+    user_times[:] = [t for t in user_times if (now - t).seconds < window]
+    
+    if len(user_times) >= limit:
+        return False
+    
+    user_times.append(now)
+    return True
+
 def get_moscow_now():
     """Получить текущее время в московской timezone"""
     return datetime.now(MOSCOW_TZ)
@@ -149,63 +167,55 @@ def get_moscow_date():
     return get_moscow_now().date()
 
 def moscow_to_utc(moscow_datetime):
-    """ИСПРАВЛЕНО: Безопасная конвертация московского времени в UTC для БД"""
+    """Безопасная конвертация московского времени в UTC для БД"""
     try:
-        # Проверка типа
         if not isinstance(moscow_datetime, datetime):
             logger.error(f"moscow_to_utc: ожидался datetime, получен {type(moscow_datetime)}")
             return None
         
         if moscow_datetime.tzinfo is None:
-            # Если datetime naive, считаем что это Москва
             moscow_datetime = MOSCOW_TZ.localize(moscow_datetime)
         
-        # Конвертируем в UTC
         utc_datetime = moscow_datetime.astimezone(UTC_TZ)
-        
-        # Возвращаем naive UTC (для PostgreSQL)
         return utc_datetime.replace(tzinfo=None)
     except Exception as e:
         logger.error(f"Ошибка moscow_to_utc: {e}")
         return None
 
 def utc_to_moscow(utc_datetime):
-    """ИСПРАВЛЕНО: Безопасная конвертация UTC из БД в московское время"""
+    """Безопасная конвертация UTC из БД в московское время"""
     try:
-        # Проверка типа
         if not isinstance(utc_datetime, datetime):
             logger.error(f"utc_to_moscow: ожидался datetime, получен {type(utc_datetime)}")
             return None
         
         if utc_datetime.tzinfo is None:
-            # Если datetime naive, считаем что это UTC
             utc_datetime = UTC_TZ.localize(utc_datetime)
         
-        # Конвертируем в московское время
         return utc_datetime.astimezone(MOSCOW_TZ)
     except Exception as e:
         logger.error(f"Ошибка utc_to_moscow: {e}")
         return None
 
 def clean_markdown_formatting(text: str) -> str:
-    """Очистить Markdown и некорректное HTML форматирование из текста"""
+    """ИСПРАВЛЕНО: Улучшенная очистка Markdown и HTML форматирования"""
     if not text:
         return ""
     
-    # 1. Убираем **жирный текст**
-    text = re.sub(r'\*\*([^\*]+?)\*\*', r'\1', text)
-    text = re.sub(r'__([^_]+?)__', r'\1', text)
+    # 1. Убираем **жирный текст** (улучшенный regex)
+    text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
+    text = re.sub(r'__(.+?)__', r'\1', text)
     
     # 2. Убираем *курсив* и _курсив_
-    text = re.sub(r'(?<!\*)\*(?!\*)([^\*]+?)\*(?!\*)', r'\1', text)
-    text = re.sub(r'(?<!_)_(?!_)([^_]+?)_(?!_)', r'\1', text)
+    text = re.sub(r'(?<!\*)\*(?!\*)(.+?)\*(?!\*)', r'\1', text)
+    text = re.sub(r'(?<!_)_(?!_)(.+?)_(?!_)', r'\1', text)
     
     # 3. Убираем оставшиеся одиночные * и _
     text = re.sub(r'(?<!\w)\*+(?!\w)', '', text)
     text = re.sub(r'(?<!\w)_+(?!\w)', '', text)
     
     # 4. Убираем `код`
-    text = re.sub(r'`([^`]+?)`', r'\1', text)
+    text = re.sub(r'`(.+?)`', r'\1', text)
     
     # 5. Убираем ### заголовки
     text = re.sub(r'^#+\s+(.+)$', r'\1', text, flags=re.MULTILINE)
@@ -219,7 +229,7 @@ def clean_markdown_formatting(text: str) -> str:
     # 8. Нормализуем списки
     text = re.sub(r'^\s*[-\*]\s+', '• ', text, flags=re.MULTILINE)
     
-    # ОЧИСТКА HTML ТЕГОВ
+    # ИСПРАВЛЕНО: Правильная очистка HTML тегов
     allowed_tags_pattern = r'</?(?!/?(?:b|i|u|s|code|pre)\b)[^>]+>'
     text = re.sub(allowed_tags_pattern, '', text)
     
@@ -339,7 +349,6 @@ def get_state_recommendations(state: str, plant_name: str = "растение") 
     
     return recommendations.get(state, recommendations['healthy'])
 
-# ИСПРАВЛЕНО: Добавлена функция очистки старых временных анализов
 async def cleanup_old_temp_analyses():
     """Очистка старых временных анализов (старше 1 часа)"""
     try:
@@ -359,6 +368,32 @@ async def cleanup_old_temp_analyses():
             logger.info(f"🧹 Очищено {len(to_delete)} старых анализов")
     except Exception as e:
         logger.error(f"Ошибка очистки temp_analyses: {e}")
+
+async def cleanup_old_database_records():
+    """НОВОЕ: Очистка старых записей из БД"""
+    try:
+        db = await get_db()
+        async with db.pool.acquire() as conn:
+            # Удалить старые неактивные напоминания (>3 месяца)
+            deleted_reminders = await conn.fetchval("""
+                DELETE FROM reminders 
+                WHERE is_active = FALSE 
+                  AND created_at < NOW() - INTERVAL '3 months'
+                RETURNING COUNT(*)
+            """)
+            
+            # Удалить старый resolved feedback (>6 месяцев)
+            deleted_feedback = await conn.fetchval("""
+                DELETE FROM feedback 
+                WHERE status = 'resolved' 
+                  AND created_at < NOW() - INTERVAL '6 months'
+                RETURNING COUNT(*)
+            """)
+            
+            if deleted_reminders or deleted_feedback:
+                logger.info(f"🧹 Очищено: {deleted_reminders} напоминаний, {deleted_feedback} отзывов")
+    except Exception as e:
+        logger.error(f"Ошибка очистки БД: {e}")
 
 # МЕНЮ НАВИГАЦИИ
 def main_menu():
@@ -387,6 +422,7 @@ def simple_back_menu():
         [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu")]
     ]
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
 # === СИСТЕМА НАПОМИНАНИЙ ===
 
 async def check_and_send_reminders():
@@ -576,7 +612,6 @@ async def send_task_reminder(reminder_row):
             [InlineKeyboardButton(text="📸 Добавить фото", callback_data=f"add_diary_photo_{growing_id}")],
         ]
         
-        # ИСПРАВЛЕНО: Улучшенная проверка и обработка photo_file_id
         photo_file_id = reminder_row.get('photo_file_id')
         
         is_valid_file_id = (
@@ -597,8 +632,7 @@ async def send_task_reminder(reminder_row):
                 )
                 logger.info(f"📸 Отправлено фото в напоминании для пользователя {user_id}")
             except Exception as e:
-                logger.error(f"Ошибка отправки фото в напоминании (file_id: {photo_file_id[:20]}...): {e}")
-                # Fallback на текстовое сообщение
+                logger.error(f"Ошибка отправки фото в напоминании: {e}")
                 await bot.send_message(
                     chat_id=user_id,
                     text=message_text,
@@ -671,7 +705,7 @@ async def schedule_next_task_reminder(growing_id: int, user_id: int, task_calend
         logger.error(f"Ошибка планирования задачи: {e}")
 
 async def send_watering_reminder(plant_row):
-    """ИСПРАВЛЕНО: Персональное напоминание с безопасной отправкой фото"""
+    """Персональное напоминание с безопасной отправкой фото"""
     try:
         user_id = plant_row['user_id']
         plant_id = plant_row['id']
@@ -706,7 +740,6 @@ async def send_watering_reminder(plant_row):
         message_text += f"📊 Состояние: {state_name}\n"
         message_text += f"⏰ {time_info}\n\n"
         
-        # Добавляем рекомендации по состоянию
         if current_state == 'flowering':
             message_text += f"💐 Растение цветет - поливайте чаще!\n"
         elif current_state == 'dormancy':
@@ -723,7 +756,6 @@ async def send_watering_reminder(plant_row):
             [InlineKeyboardButton(text="📸 Обновить состояние", callback_data=f"update_state_{plant_id}")],
         ]
         
-        # ИСПРАВЛЕНО: Безопасная отправка фото с try-except
         photo_file_id = plant_row.get('photo_file_id')
         
         is_valid_file_id = (
@@ -743,8 +775,7 @@ async def send_watering_reminder(plant_row):
                 )
                 logger.info(f"💧 Напоминание с фото отправлено пользователю {user_id}")
             except Exception as e:
-                logger.error(f"Ошибка отправки фото в напоминании (file_id: {photo_file_id[:20] if photo_file_id else 'None'}...): {e}")
-                # Fallback на текстовое сообщение
+                logger.error(f"Ошибка отправки фото в напоминании: {e}")
                 await bot.send_message(
                     chat_id=user_id,
                     text=message_text,
@@ -759,13 +790,11 @@ async def send_watering_reminder(plant_row):
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
             )
         
-        # Сохраняем время отправки напоминания
         moscow_now_utc = moscow_to_utc(moscow_now)
         
         if moscow_now_utc:
             async with db.pool.acquire() as conn:
                 async with conn.transaction():
-                    # Деактивируем старые напоминания
                     await conn.execute("""
                         UPDATE reminders 
                         SET is_active = FALSE 
@@ -773,7 +802,6 @@ async def send_watering_reminder(plant_row):
                           AND reminder_type = 'watering' AND is_active = TRUE
                     """, user_id, plant_id)
                     
-                    # Создаем новое напоминание
                     await conn.execute("""
                         INSERT INTO reminders (user_id, plant_id, reminder_type, next_date, last_sent)
                         VALUES ($1, $2, 'watering', $3, $3)
@@ -783,7 +811,7 @@ async def send_watering_reminder(plant_row):
         logger.error(f"Ошибка напоминания: {e}")
 
 async def create_plant_reminder(plant_id: int, user_id: int, interval_days: int = 5):
-    """Создать напоминание"""
+    """ИСПРАВЛЕНО: Создать напоминание с логированием"""
     try:
         db = await get_db()
         moscow_now = get_moscow_now()
@@ -797,10 +825,14 @@ async def create_plant_reminder(plant_id: int, user_id: int, interval_days: int 
                 reminder_type='watering',
                 next_date=next_watering_utc
             )
+            logger.info(f"✅ Напоминание создано для растения {plant_id}, через {interval_days} дней")
+        else:
+            logger.error(f"❌ Не удалось создать напоминание для растения {plant_id} - ошибка конвертации времени")
         
     except Exception as e:
-        logger.error(f"Ошибка создания напоминания: {e}")
-# === АНАЛИЗ РАСТЕНИЙ С ОПРЕДЕЛЕНИЕМ СОСТОЯНИЯ ===
+        logger.error(f"❌ Ошибка создания напоминания для растения {plant_id}: {e}")
+
+# === АНАЛИЗ РАСТЕНИЙ ===
 
 def extract_plant_state_from_analysis(raw_analysis: str) -> dict:
     """Извлечь информацию о состоянии из анализа AI"""
@@ -1160,7 +1192,7 @@ async def analyze_plant_image(image_data: bytes, user_question: str = None,
         "state_info": state_info
     }
 
-# === ФУНКЦИЯ ГЕНЕРАЦИИ ПЛАНА ВЫРАЩИВАНИЯ ===
+# === ГЕНЕРАЦИЯ ПЛАНА ВЫРАЩИВАНИЯ ===
 
 async def get_growing_plan_from_ai(plant_name: str) -> tuple:
     """Генерация плана выращивания через OpenAI"""
@@ -1252,7 +1284,8 @@ def create_default_task_calendar(plant_name: str) -> dict:
             ]
         }
     }
-    # === ОБРАБОТЧИКИ КОМАНД ===
+
+# === ОБРАБОТЧИКИ КОМАНД ===
 
 @dp.message(Command("start"))
 async def start_command(message: types.Message):
@@ -1611,12 +1644,20 @@ async def handle_state_update_photo(message: types.Message, state: FSMContext):
         
         photo = message.photo[-1]
         
-        # ИСПРАВЛЕНО: Проверка размера фото
         if photo.file_size and photo.file_size > MAX_PHOTO_SIZE:
             await message.reply(
-                "❌ <b>Фото слишком большое</b>\n\n"
-                "Максимальный размер: 10 МБ\n"
-                "Сожмите фото и попробуйте снова",
+                f"❌ <b>Фото слишком большое</b>\n\n"
+                f"Максимальный размер: {MAX_PHOTO_SIZE // (1024*1024)} МБ\n"
+                f"Сожмите фото и попробуйте снова",
+                parse_mode="HTML"
+            )
+            return
+        
+        # ИСПРАВЛЕНО: Проверка rate limit перед анализом
+        if not await check_rate_limit(user_id, limit=5, window=60):
+            await message.reply(
+                "⏳ <b>Слишком много запросов</b>\n\n"
+                "Подождите минуту перед следующим анализом",
                 parse_mode="HTML"
             )
             return
@@ -1716,19 +1757,27 @@ async def handle_state_update_photo(message: types.Message, state: FSMContext):
         await message.reply("❌ Техническая ошибка")
         await state.clear()
 
-# ИСПРАВЛЕНО: Добавлена проверка размера фото
 @dp.message(F.photo)
 async def handle_photo(message: types.Message):
     """Обработка фотографий - ГЛАВНЫЙ АНАЛИЗ"""
     try:
         photo = message.photo[-1]
+        user_id = message.from_user.id
         
-        # ИСПРАВЛЕНО: Проверка размера фото
         if photo.file_size and photo.file_size > MAX_PHOTO_SIZE:
             await message.reply(
-                "❌ <b>Фото слишком большое</b>\n\n"
-                "Максимальный размер: 10 МБ\n"
-                "Сожмите фото и попробуйте снова",
+                f"❌ <b>Фото слишком большое</b>\n\n"
+                f"Максимальный размер: {MAX_PHOTO_SIZE // (1024*1024)} МБ\n"
+                f"Сожмите фото и попробуйте снова",
+                parse_mode="HTML"
+            )
+            return
+        
+        # ИСПРАВЛЕНО: Проверка rate limit
+        if not await check_rate_limit(user_id, limit=10, window=60):
+            await message.reply(
+                "⏳ <b>Слишком много запросов</b>\n\n"
+                "Подождите минуту перед следующим анализом",
                 parse_mode="HTML"
             )
             return
@@ -1751,9 +1800,6 @@ async def handle_photo(message: types.Message):
         await processing_msg.delete()
         
         if result["success"]:
-            user_id = message.from_user.id
-            
-            # ИСПРАВЛЕНО: Добавлена временная метка для очистки
             temp_analyses[user_id] = {
                 "analysis": result.get("raw_analysis", result["analysis"]),
                 "formatted_analysis": result["analysis"],
@@ -1858,7 +1904,6 @@ async def save_plant_callback(callback: types.CallbackQuery):
             
             await create_plant_reminder(plant_id, user_id, personal_interval)
             
-            # ИСПРАВЛЕНО: Очищаем временные данные при сохранении
             del temp_analyses[user_id]
             temp_analyses_timestamps.pop(user_id, None)
             
@@ -1882,7 +1927,8 @@ async def save_plant_callback(callback: types.CallbackQuery):
         await callback.message.answer("❌ Нет данных. Сначала проанализируйте растение")
     
     await callback.answer()
-    # === CALLBACK ОБРАБОТЧИКИ ===
+
+# === CALLBACK ОБРАБОТЧИКИ ===
 
 @dp.callback_query(F.data == "menu")
 async def menu_callback(callback: types.CallbackQuery):
@@ -1970,11 +2016,18 @@ async def my_plants_callback(callback: types.CallbackQuery):
     
     await callback.answer()
 
+# ИСПРАВЛЕНО: Безопасный парсинг callback_data
 @dp.callback_query(F.data.startswith("edit_plant_"))
 async def edit_plant_callback(callback: types.CallbackQuery):
     """Меню редактирования обычного растения"""
     try:
-        plant_id = int(callback.data.split("_")[-1])
+        # ИСПРАВЛЕНО: Безопасный парсинг ID
+        try:
+            plant_id = int(callback.data.split("_")[-1])
+        except (ValueError, IndexError):
+            await callback.answer("❌ Ошибка данных", show_alert=True)
+            return
+        
         user_id = callback.from_user.id
         
         db = await get_db()
@@ -2041,7 +2094,13 @@ async def edit_plant_callback(callback: types.CallbackQuery):
 async def water_single_plant_callback(callback: types.CallbackQuery):
     """Полив растения"""
     try:
-        plant_id = int(callback.data.split("_")[-1])
+        # ИСПРАВЛЕНО: Безопасный парсинг
+        try:
+            plant_id = int(callback.data.split("_")[-1])
+        except (ValueError, IndexError):
+            await callback.answer("❌ Ошибка данных", show_alert=True)
+            return
+        
         user_id = callback.from_user.id
         
         db = await get_db()
@@ -2097,7 +2156,13 @@ async def water_plants_callback(callback: types.CallbackQuery):
 async def update_state_callback(callback: types.CallbackQuery, state: FSMContext):
     """Обновить состояние растения"""
     try:
-        plant_id = int(callback.data.split("_")[-1])
+        # ИСПРАВЛЕНО: Безопасный парсинг
+        try:
+            plant_id = int(callback.data.split("_")[-1])
+        except (ValueError, IndexError):
+            await callback.answer("❌ Ошибка данных", show_alert=True)
+            return
+        
         user_id = callback.from_user.id
         
         await state.update_data(
@@ -2127,7 +2192,13 @@ async def update_state_callback(callback: types.CallbackQuery, state: FSMContext
 async def view_state_history_callback(callback: types.CallbackQuery):
     """Просмотр истории состояний"""
     try:
-        plant_id = int(callback.data.split("_")[-1])
+        # ИСПРАВЛЕНО: Безопасный парсинг
+        try:
+            plant_id = int(callback.data.split("_")[-1])
+        except (ValueError, IndexError):
+            await callback.answer("❌ Ошибка данных", show_alert=True)
+            return
+        
         user_id = callback.from_user.id
         
         db = await get_db()
@@ -2190,7 +2261,13 @@ async def view_state_history_callback(callback: types.CallbackQuery):
 async def rename_plant_callback(callback: types.CallbackQuery, state: FSMContext):
     """Переименование растения"""
     try:
-        plant_id = int(callback.data.split("_")[-1])
+        # ИСПРАВЛЕНО: Безопасный парсинг
+        try:
+            plant_id = int(callback.data.split("_")[-1])
+        except (ValueError, IndexError):
+            await callback.answer("❌ Ошибка данных", show_alert=True)
+            return
+        
         user_id = callback.from_user.id
         
         db = await get_db()
@@ -2224,8 +2301,13 @@ async def handle_plant_rename(message: types.Message, state: FSMContext):
     try:
         new_name = message.text.strip()
         
+        # ИСПРАВЛЕНО: Валидация длины
         if len(new_name) < 2:
             await message.reply("❌ Слишком короткое")
+            return
+        
+        if len(new_name) > MAX_INPUT_LENGTH:
+            await message.reply(f"❌ Слишком длинное название (макс. {MAX_INPUT_LENGTH} символов)")
             return
         
         data = await state.get_data()
@@ -2259,7 +2341,13 @@ async def handle_plant_rename(message: types.Message, state: FSMContext):
 async def delete_plant_callback(callback: types.CallbackQuery):
     """Удаление растения"""
     try:
-        plant_id = int(callback.data.split("_")[-1])
+        # ИСПРАВЛЕНО: Безопасный парсинг
+        try:
+            plant_id = int(callback.data.split("_")[-1])
+        except (ValueError, IndexError):
+            await callback.answer("❌ Ошибка данных", show_alert=True)
+            return
+        
         user_id = callback.from_user.id
         
         db = await get_db()
@@ -2295,7 +2383,13 @@ async def delete_plant_callback(callback: types.CallbackQuery):
 async def confirm_delete_callback(callback: types.CallbackQuery):
     """Подтверждение удаления"""
     try:
-        plant_id = int(callback.data.split("_")[-1])
+        # ИСПРАВЛЕНО: Безопасный парсинг
+        try:
+            plant_id = int(callback.data.split("_")[-1])
+        except (ValueError, IndexError):
+            await callback.answer("❌ Ошибка данных", show_alert=True)
+            return
+        
         user_id = callback.from_user.id
         
         db = await get_db()
@@ -2387,7 +2481,13 @@ async def help_callback(callback: types.CallbackQuery):
 async def snooze_reminder_callback(callback: types.CallbackQuery):
     """Отложить напоминание"""
     try:
-        plant_id = int(callback.data.split("_")[-1])
+        # ИСПРАВЛЕНО: Безопасный парсинг
+        try:
+            plant_id = int(callback.data.split("_")[-1])
+        except (ValueError, IndexError):
+            await callback.answer("❌ Ошибка данных", show_alert=True)
+            return
+        
         user_id = callback.from_user.id
         
         db = await get_db()
@@ -2611,6 +2711,7 @@ async def mark_onboarding_completed(user_id: int):
             )
     except Exception as e:
         logger.error(f"Ошибка онбординга: {e}")
+
 # === ВЫРАЩИВАНИЕ РАСТЕНИЙ ===
 
 @dp.callback_query(F.data == "grow_from_scratch")
@@ -2635,8 +2736,13 @@ async def handle_plant_choice_for_growing(message: types.Message, state: FSMCont
     try:
         plant_name = message.text.strip()
         
+        # ИСПРАВЛЕНО: Валидация длины
         if len(plant_name) < 2:
             await message.reply("🤔 Слишком короткое название")
+            return
+        
+        if len(plant_name) > MAX_INPUT_LENGTH:
+            await message.reply(f"❌ Слишком длинное название (макс. {MAX_INPUT_LENGTH} символов)")
             return
         
         processing_msg = await message.reply(
@@ -2736,7 +2842,13 @@ async def confirm_growing_plan_callback(callback: types.CallbackQuery, state: FS
 async def edit_growing_callback(callback: types.CallbackQuery):
     """Меню редактирования выращиваемого растения"""
     try:
-        growing_id = int(callback.data.split("_")[-1])
+        # ИСПРАВЛЕНО: Безопасный парсинг
+        try:
+            growing_id = int(callback.data.split("_")[-1])
+        except (ValueError, IndexError):
+            await callback.answer("❌ Ошибка данных", show_alert=True)
+            return
+        
         user_id = callback.from_user.id
         
         db = await get_db()
@@ -2786,7 +2898,13 @@ async def edit_growing_callback(callback: types.CallbackQuery):
 async def delete_growing_callback(callback: types.CallbackQuery):
     """Удаление выращиваемого растения"""
     try:
-        growing_id = int(callback.data.split("_")[-1])
+        # ИСПРАВЛЕНО: Безопасный парсинг
+        try:
+            growing_id = int(callback.data.split("_")[-1])
+        except (ValueError, IndexError):
+            await callback.answer("❌ Ошибка данных", show_alert=True)
+            return
+        
         user_id = callback.from_user.id
         
         db = await get_db()
@@ -2822,7 +2940,13 @@ async def delete_growing_callback(callback: types.CallbackQuery):
 async def confirm_delete_growing_callback(callback: types.CallbackQuery):
     """Подтверждение удаления выращиваемого растения"""
     try:
-        growing_id = int(callback.data.split("_")[-1])
+        # ИСПРАВЛЕНО: Безопасный парсинг
+        try:
+            growing_id = int(callback.data.split("_")[-1])
+        except (ValueError, IndexError):
+            await callback.answer("❌ Ошибка данных", show_alert=True)
+            return
+        
         user_id = callback.from_user.id
         
         db = await get_db()
@@ -2852,15 +2976,23 @@ async def confirm_delete_growing_callback(callback: types.CallbackQuery):
     
     await callback.answer()
 
-# ИСПРАВЛЕНО: Обработчики для выращивания
-
 @dp.callback_query(F.data.startswith("task_done_"))
 async def task_done_callback(callback: types.CallbackQuery):
     """Отметить задачу выполненной"""
     try:
         parts = callback.data.split("_")
-        growing_id = int(parts[2])
-        task_day = int(parts[3])
+        # ИСПРАВЛЕНО: Безопасный парсинг с проверкой длины
+        try:
+            if len(parts) >= 4:
+                growing_id = int(parts[2])
+                task_day = int(parts[3])
+            else:
+                await callback.answer("❌ Ошибка данных", show_alert=True)
+                return
+        except (ValueError, IndexError):
+            await callback.answer("❌ Ошибка данных", show_alert=True)
+            return
+        
         user_id = callback.from_user.id
         
         db = await get_db()
@@ -2895,7 +3027,13 @@ async def task_done_callback(callback: types.CallbackQuery):
 async def add_diary_photo_callback(callback: types.CallbackQuery, state: FSMContext):
     """Добавить фото в дневник выращивания"""
     try:
-        growing_id = int(callback.data.split("_")[-1])
+        # ИСПРАВЛЕНО: Безопасный парсинг
+        try:
+            growing_id = int(callback.data.split("_")[-1])
+        except (ValueError, IndexError):
+            await callback.answer("❌ Ошибка данных", show_alert=True)
+            return
+        
         user_id = callback.from_user.id
         
         db = await get_db()
@@ -2981,7 +3119,13 @@ async def handle_diary_photo(message: types.Message, state: FSMContext):
 async def view_diary_callback(callback: types.CallbackQuery):
     """Просмотр дневника выращивания"""
     try:
-        growing_id = int(callback.data.split("_")[-1])
+        # ИСПРАВЛЕНО: Безопасный парсинг
+        try:
+            growing_id = int(callback.data.split("_")[-1])
+        except (ValueError, IndexError):
+            await callback.answer("❌ Ошибка данных", show_alert=True)
+            return
+        
         user_id = callback.from_user.id
         
         db = await get_db()
@@ -3092,8 +3236,13 @@ async def handle_feedback_message(message: types.Message, state: FSMContext):
             await message.reply("📝 Напишите сообщение или приложите фото")
             return
         
+        # ИСПРАВЛЕНО: Валидация длины
         if feedback_text and len(feedback_text) < 5:
             await message.reply("📝 Слишком короткое (минимум 5 символов)")
+            return
+        
+        if feedback_text and len(feedback_text) > 1000:
+            await message.reply("📝 Слишком длинное (максимум 1000 символов)")
             return
         
         data = await state.get_data()
@@ -3132,9 +3281,19 @@ async def handle_question(message: types.Message, state: FSMContext):
     try:
         logger.info(f"❓ Пользователь {message.from_user.id} задал вопрос")
         
+        user_id = message.from_user.id
+        
+        # ИСПРАВЛЕНО: Rate limiting
+        if not await check_rate_limit(user_id, limit=5, window=60):
+            await message.reply(
+                "⏳ <b>Слишком много вопросов</b>\n\n"
+                "Подождите минуту перед следующим вопросом",
+                parse_mode="HTML"
+            )
+            return
+        
         data = await state.get_data()
         plant_id = data.get('question_plant_id')
-        user_id = message.from_user.id
         
         processing_msg = await message.reply("🤔 <b>Анализирую с учетом истории растения...</b>", parse_mode="HTML")
         
@@ -3204,8 +3363,11 @@ async def handle_question(message: types.Message, state: FSMContext):
         if answer and len(answer) > 50:
             cleaned_answer = clean_markdown_formatting(answer)
             cleaned_answer = html.escape(cleaned_answer)
-            cleaned_answer = cleaned_answer.replace('&lt;b&gt;', '<b>').replace('&lt;/b&gt;', '</b>')
-            cleaned_answer = cleaned_answer.replace('&lt;i&gt;', '<i>').replace('&lt;/i&gt;', '</i>')
+            
+            # ИСПРАВЛЕНО: Разэкранирование всех поддерживаемых тегов
+            for tag in ['b', 'i', 'u', 's', 'code', 'pre']:
+                cleaned_answer = cleaned_answer.replace(f'&lt;{tag}&gt;', f'<{tag}>')
+                cleaned_answer = cleaned_answer.replace(f'&lt;/{tag}&gt;', f'</{tag}>')
             
             if plant_id and context_text:
                 cleaned_answer += "\n\n💡 <i>Ответ учитывает полную историю вашего растения</i>"
@@ -3233,7 +3395,13 @@ async def handle_question(message: types.Message, state: FSMContext):
 async def ask_about_plant_callback(callback: types.CallbackQuery, state: FSMContext):
     """Задать вопрос о конкретном растении"""
     try:
-        plant_id = int(callback.data.split("_")[-1])
+        # ИСПРАВЛЕНО: Безопасный парсинг
+        try:
+            plant_id = int(callback.data.split("_")[-1])
+        except (ValueError, IndexError):
+            await callback.answer("❌ Ошибка данных", show_alert=True)
+            return
+        
         user_id = callback.from_user.id
         
         db = await get_db()
@@ -3299,10 +3467,14 @@ async def catch_all_messages(message: types.Message):
 async def on_startup():
     """Инициализация"""
     try:
-        # ИСПРАВЛЕНО: Валидация обязательных переменных
+        # ИСПРАВЛЕНО: Валидация всех ENV переменных
         if not BOT_TOKEN:
             logger.error("❌ BOT_TOKEN не установлен!")
             raise ValueError("BOT_TOKEN is required")
+        
+        if not DATABASE_URL:
+            logger.error("❌ DATABASE_URL не установлен!")
+            raise ValueError("DATABASE_URL is required")
         
         if not OPENAI_API_KEY:
             logger.error("❌ OPENAI_API_KEY не установлен!")
@@ -3338,7 +3510,6 @@ async def on_startup():
             replace_existing=True
         )
         
-        # ИСПРАВЛЕНО: Добавлена очистка временных анализов
         scheduler.add_job(
             cleanup_old_temp_analyses,
             'interval',
@@ -3347,11 +3518,23 @@ async def on_startup():
             replace_existing=True
         )
         
+        # НОВОЕ: Месячная очистка БД
+        scheduler.add_job(
+            cleanup_old_database_records,
+            'cron',
+            day=1,
+            hour=3,
+            minute=0,
+            id='monthly_db_cleanup',
+            replace_existing=True
+        )
+        
         scheduler.start()
         logger.info("🔔 Планировщик запущен")
         logger.info("⏰ Ежедневные напоминания: 9:00 МСК")
         logger.info("📸 Месячные напоминания: 10:00 МСК")
         logger.info("🧹 Очистка temp_analyses: каждые 30 минут")
+        logger.info("🧹 Очистка БД: 1 числа каждого месяца в 3:00")
         
         if WEBHOOK_URL:
             await bot.set_webhook(f"{WEBHOOK_URL}/webhook")
@@ -3384,6 +3567,7 @@ async def on_shutdown():
     except:
         pass
 
+# ИСПРАВЛЕНО: Безопасная проверка токена
 async def webhook_handler(request):
     """Webhook обработчик"""
     try:
@@ -3391,7 +3575,9 @@ async def webhook_handler(request):
         index = url.rfind('/')
         token = url[index + 1:]
         
-        if token == BOT_TOKEN.split(':')[1]:
+        # ИСПРАВЛЕНО: Безопасная проверка токена
+        token_parts = BOT_TOKEN.split(':')
+        if len(token_parts) >= 2 and token == token_parts[1]:
             update = types.Update.model_validate(await request.json(), strict=False)
             await dp.feed_update(bot, update)
             return web.Response()
@@ -3407,14 +3593,15 @@ async def health_check(request):
     return web.json_response({
         "status": "healthy", 
         "bot": "Bloom AI", 
-        "version": "4.3 - All Fixed"
+        "version": "4.4 - All Fixed + Rate Limiting"
     })
 
 async def main():
     """Main функция"""
     try:
-        logger.info("🚀 Запуск Bloom AI v4.3 (ИСПРАВЛЕННАЯ ВЕРСИЯ)...")
+        logger.info("🚀 Запуск Bloom AI v4.4 (ПОЛНОСТЬЮ ИСПРАВЛЕННАЯ ВЕРСИЯ)...")
         logger.info(f"🔑 BOT_TOKEN: {'✅ Установлен' if BOT_TOKEN else '❌ Отсутствует'}")
+        logger.info(f"🔑 DATABASE_URL: {'✅ Установлен' if DATABASE_URL else '❌ Отсутствует'}")
         logger.info(f"🔑 OPENAI_API_KEY: {'✅ Установлен' if OPENAI_API_KEY else '❌ Отсутствует'}")
         logger.info(f"🌐 WEBHOOK_URL: {WEBHOOK_URL if WEBHOOK_URL else '❌ Не установлен (polling режим)'}")
         
@@ -3431,15 +3618,18 @@ async def main():
             site = web.TCPSite(runner, '0.0.0.0', PORT)
             await site.start()
             
-            logger.info(f"🚀 Bloom AI v4.3 запущен на порту {PORT}")
-            logger.info(f"✅ ВСЕ ИСПРАВЛЕНИЯ ПРИМЕНЕНЫ:")
-            logger.info(f"   ✓ Memory leak temp_analyses исправлен")
-            logger.info(f"   ✓ Проверка размера фото добавлена")
-            logger.info(f"   ✓ Безопасная отправка фото с try-except")
-            logger.info(f"   ✓ Правильная конвертация timezone")
+            logger.info(f"🚀 Bloom AI v4.4 запущен на порту {PORT}")
+            logger.info(f"✅ ВСЕ КРИТИЧЕСКИЕ ИСПРАВЛЕНИЯ ПРИМЕНЕНЫ:")
+            logger.info(f"   ✓ Транзакции для reminders")
+            logger.info(f"   ✓ Безопасный парсинг callback_data")
+            logger.info(f"   ✓ Проверка токена webhook")
+            logger.info(f"   ✓ Валидация длины input")
+            logger.info(f"   ✓ Rate limiting для OpenAI")
             logger.info(f"   ✓ Валидация ENV переменных")
-            logger.info(f"   ✓ Обработчики для выращивания добавлены")
-            logger.info(f"   ✓ Транзакции для напоминаний")
+            logger.info(f"   ✓ Увеличен MAX_PHOTO_SIZE до 20MB")
+            logger.info(f"   ✓ Месячная очистка БД")
+            logger.info(f"   ✓ Улучшенные regex")
+            logger.info(f"   ✓ Логирование создания reminders")
             
             try:
                 await asyncio.Future()
