@@ -1,20 +1,14 @@
 """
 Plant Memory Manager - Система управления полным контекстом растений
 Обеспечивает долгосрочную память AI по каждому растению
-ИСПРАВЛЕНО: Правильная обработка timezone, JSON данных и сортировка
 """
 
 import logging
 import json
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
-import pytz
 
 logger = logging.getLogger(__name__)
-
-# Timezone константы
-MOSCOW_TZ = pytz.timezone('Europe/Moscow')
-UTC_TZ = pytz.UTC
 
 class PlantMemoryManager:
     """Менеджер памяти растений"""
@@ -28,16 +22,7 @@ class PlantMemoryManager:
                                 include_problems: bool = True) -> Dict:
         """Построить полный контекст растения"""
         try:
-            # ИСПРАВЛЕНО: Проверка кэша с expiration
-            cache_key = f"{user_id}_{plant_id}"
-            if cache_key in self.context_cache:
-                cached = self.context_cache[cache_key]
-                cache_age = (datetime.now() - cached["timestamp"]).seconds
-                
-                if cache_age < 300:  # 5 минут
-                    logger.info(f"📦 Использую кэш для растения {plant_id}")
-                    return cached["context"]
-            
+            # ИСПРАВЛЕНИЕ: Импорт внутри функции во избежание циклических импортов
             from database import get_db
             
             db = await get_db()
@@ -89,13 +74,10 @@ class PlantMemoryManager:
                 "environment": {}
             }
             
-            # ИСПРАВЛЕНО: Безопасное вычисление дней в коллекции
+            # ИСПРАВЛЕНИЕ: Безопасное вычисление дней в коллекции
             if plant_info.get('saved_date'):
                 try:
-                    saved_date = plant_info['saved_date']
-                    if saved_date.tzinfo is not None:
-                        saved_date = saved_date.replace(tzinfo=None)
-                    context["days_in_collection"] = (datetime.now() - saved_date).days
+                    context["days_in_collection"] = (datetime.now() - plant_info['saved_date']).days
                 except Exception as e:
                     logger.error(f"Ошибка вычисления дней: {e}")
                     context["days_in_collection"] = 0
@@ -153,7 +135,7 @@ class PlantMemoryManager:
                 logger.error(f"Ошибка загрузки условий: {e}")
             
             # Кэшируем контекст
-            self.context_cache[cache_key] = {
+            self.context_cache[f"{user_id}_{plant_id}"] = {
                 "context": context,
                 "timestamp": datetime.now()
             }
@@ -221,19 +203,21 @@ class PlantMemoryManager:
         return formatted
     
     def _format_patterns(self, patterns: List[Dict]) -> List[Dict]:
-        """ИСПРАВЛЕНО: Правильное форматирование паттернов пользователя"""
+        """Форматировать паттерны пользователя"""
         formatted = []
         for pattern in patterns:
             try:
+                # ИСПРАВЛЕНИЕ: Правильная обработка JSONB данных
                 pattern_data = pattern.get('pattern_data')
                 
+                # Если это строка JSON, парсим
                 if isinstance(pattern_data, str):
                     try:
                         pattern_data = json.loads(pattern_data)
-                    except json.JSONDecodeError as e:
-                        logger.error(f"Ошибка парсинга JSON паттерна: {e}")
+                    except:
                         pattern_data = {"raw": pattern_data}
                 
+                # Если None, устанавливаем пустой dict
                 if pattern_data is None:
                     pattern_data = {}
                 
@@ -249,7 +233,7 @@ class PlantMemoryManager:
         return formatted
     
     def _find_recurring_problems(self, problems: List[Dict]) -> List[Dict]:
-        """ИСПРАВЛЕНО: Найти повторяющиеся проблемы с правильной сортировкой"""
+        """Найти повторяющиеся проблемы"""
         try:
             problem_counts = {}
             for problem in problems:
@@ -264,14 +248,11 @@ class PlantMemoryManager:
             recurring = []
             for ptype, occurrences in problem_counts.items():
                 if len(occurrences) >= 2:
+                    # ИСПРАВЛЕНИЕ: Безопасное получение дат
                     dates = []
                     for p in occurrences:
-                        problem_date = p.get('problem_date')
-                        if problem_date:
-                            dates.append(problem_date)
-                    
-                    # ИСПРАВЛЕНО: Сортировка по убыванию (последнее первым)
-                    dates.sort(reverse=True)
+                        if p.get('problem_date'):
+                            dates.append(p['problem_date'])
                     
                     recurring.append({
                         "problem_type": ptype,
@@ -293,6 +274,7 @@ class PlantMemoryManager:
         if len(full_text) <= max_length:
             return full_text
         
+        # Берем первые строки до ПОЛИВ_АНАЛИЗ
         lines = full_text.split('\n')
         summary = []
         for line in lines[:10]:
@@ -309,20 +291,6 @@ class PlantMemoryManager:
         if len(text) <= max_length:
             return text
         return text[:max_length] + "..."
-    
-    def _safe_utc_to_moscow(self, utc_datetime):
-        """Безопасная конвертация UTC в московское время"""
-        try:
-            if not isinstance(utc_datetime, datetime):
-                return None
-            
-            if utc_datetime.tzinfo is None:
-                utc_datetime = UTC_TZ.localize(utc_datetime)
-            
-            return utc_datetime.astimezone(MOSCOW_TZ)
-        except Exception as e:
-            logger.error(f"Ошибка конвертации datetime: {e}")
-            return None
     
     async def format_context_for_ai(self, plant_id: int, user_id: int,
                                    focus: str = "general") -> str:
@@ -357,24 +325,14 @@ class PlantMemoryManager:
             lines.append(f"ЭТАП РОСТА: {context.get('growth_stage', 'unknown')}")
             lines.append("")
             
-            # Полив (ИСПРАВЛЕНО: правильная работа с datetime)
+            # Полив
             watering = context.get('watering_info', {})
-            last_watered = watering.get('last_watered')
-            if last_watered:
+            if watering.get('last_watered'):
                 try:
-                    last_watered_moscow = self._safe_utc_to_moscow(last_watered)
-                    
-                    if last_watered_moscow:
-                        moscow_now = datetime.now(MOSCOW_TZ)
-                        days_ago = (moscow_now.date() - last_watered_moscow.date()).days
-                        lines.append(f"ПОЛИВ: последний {days_ago} дней назад, интервал {watering.get('watering_interval', 5)} дней")
-                    else:
-                        lines.append(f"ПОЛИВ: интервал {watering.get('watering_interval', 5)} дней")
-                except Exception as e:
-                    logger.error(f"Ошибка обработки last_watered: {e}")
+                    days_ago = (datetime.now() - watering['last_watered']).days
+                    lines.append(f"ПОЛИВ: последний {days_ago} дней назад, интервал {watering.get('watering_interval', 5)} дней")
+                except:
                     lines.append(f"ПОЛИВ: интервал {watering.get('watering_interval', 5)} дней")
-            else:
-                lines.append(f"ПОЛИВ: интервал {watering.get('watering_interval', 5)} дней")
             lines.append("")
             
             # История состояний (последние 3)
@@ -383,16 +341,10 @@ class PlantMemoryManager:
                 lines.append("ИСТОРИЯ СОСТОЯНИЙ:")
                 for state in state_history[:3]:
                     try:
-                        state_date = state.get('date')
-                        if isinstance(state_date, datetime):
-                            date_str = state_date.strftime('%d.%m')
-                        else:
-                            date_str = "N/A"
-                        
+                        date_str = state.get('date', datetime.now()).strftime('%d.%m')
                         from_state = state.get('from') or 'начало'
                         to_state = state.get('to', 'unknown')
                         lines.append(f"  {date_str}: {from_state} → {to_state}")
-                        
                         if state.get('reason'):
                             lines.append(f"    Причина: {state['reason']}")
                     except Exception as e:
@@ -439,15 +391,9 @@ class PlantMemoryManager:
                 lines.append("ПРЕДЫДУЩИЕ ВОПРОСЫ:")
                 for qa in qa_history[:3]:
                     try:
-                        qa_date = qa.get('date')
-                        if isinstance(qa_date, datetime):
-                            date_str = qa_date.strftime('%d.%m')
-                        else:
-                            date_str = "N/A"
-                        
+                        date_str = qa.get('date', datetime.now()).strftime('%d.%m')
                         question = qa.get('question', '')
                         lines.append(f"  {date_str}: {question}")
-                        
                         if qa.get('action_taken'):
                             lines.append(f"    Действие: {qa['action_taken']}")
                         if qa.get('resolved'):
@@ -470,6 +416,7 @@ class PlantMemoryManager:
         lines.append(f"СОСТОЯНИЕ: {context.get('current_state', 'unknown')}")
         lines.append("")
         
+        # Детальная история проблем
         current_problems = context.get('problems', {}).get('current', [])
         if current_problems:
             lines.append("=== ТЕКУЩИЕ ПРОБЛЕМЫ ===")
@@ -493,6 +440,7 @@ class PlantMemoryManager:
         lines.append(f"ВОЗРАСТ В КОЛЛЕКЦИИ: {context.get('days_in_collection', 0)} дней")
         lines.append("")
         
+        # Детальная информация о поливе
         watering = context.get('watering_info', {})
         lines.append("=== ИСТОРИЯ ПОЛИВА ===")
         lines.append(f"Всего поливов: {watering.get('total_waterings', 0)}")
@@ -508,10 +456,12 @@ class PlantMemoryManager:
                 if key in self.context_cache:
                     del self.context_cache[key]
             elif user_id:
+                # Очистить все растения пользователя
                 keys_to_delete = [k for k in self.context_cache.keys() if k.startswith(f"{user_id}_")]
                 for key in keys_to_delete:
                     del self.context_cache[key]
             else:
+                # Очистить весь кэш
                 self.context_cache.clear()
         except Exception as e:
             logger.error(f"Ошибка очистки кэша: {e}")
@@ -531,6 +481,7 @@ async def get_plant_context(plant_id: int, user_id: int, focus: str = "general")
 async def save_interaction(plant_id: int, user_id: int, question: str, answer: str, context_used: dict = None):
     """Сохранить взаимодействие с растением"""
     try:
+        # ИСПРАВЛЕНИЕ: Импорт внутри функции
         from database import get_db
         
         db = await get_db()
