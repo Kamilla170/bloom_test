@@ -116,15 +116,13 @@ def register_middleware():
 
 def register_handlers():
     """Регистрация всех handlers"""
-    # Регистрация routers в правильном порядке
     dp.include_router(commands.router)
     dp.include_router(photo.router)
     dp.include_router(plants.router)
     dp.include_router(questions.router)
     dp.include_router(feedback.router)
-    dp.include_router(onboarding.router)
     dp.include_router(growing.router)
-    dp.include_router(callbacks.router)  # Callbacks последними как fallback
+    dp.include_router(callbacks.router)
     
     logger.info("✅ Handlers зарегистрированы")
 
