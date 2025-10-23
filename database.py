@@ -27,7 +27,7 @@ class PlantDatabase:
             raise
             
     async def create_tables(self):
-        """ИСПРАВЛЕНО: Создание таблиц с правильными constraints"""
+        """Создание таблиц"""
         async with self.pool.acquire() as conn:
             # Таблица пользователей
             await conn.execute("""
@@ -55,27 +55,7 @@ class PlantDatabase:
                 )
             """)
             
-            # ИСПРАВЛЕНО: Таблица выращиваемых растений (создается ПЕРЕД plants)
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS growing_plants (
-                    id SERIAL PRIMARY KEY,
-                    user_id BIGINT NOT NULL,
-                    plant_name TEXT NOT NULL,
-                    growth_method TEXT NOT NULL,
-                    growing_plan TEXT NOT NULL,
-                    task_calendar JSONB,
-                    current_stage INTEGER DEFAULT 0,
-                    total_stages INTEGER DEFAULT 4,
-                    started_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    estimated_completion DATE,
-                    status TEXT DEFAULT 'active',
-                    notes TEXT,
-                    photo_file_id TEXT,
-                    FOREIGN KEY (user_id) REFERENCES users (user_id) ON DELETE CASCADE
-                )
-            """)
-            
-            # ИСПРАВЛЕНО: Таблица растений с правильным FK для growing_id
+            # Таблица растений
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS plants (
                     id SERIAL PRIMARY KEY,
@@ -98,13 +78,13 @@ class PlantDatabase:
                     growth_stage TEXT DEFAULT 'young',
                     last_photo_analysis TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     environment_data JSONB,
-                    FOREIGN KEY (user_id) REFERENCES users (user_id) ON DELETE CASCADE,
-                    FOREIGN KEY (growing_id) REFERENCES growing_plants (id) ON DELETE SET NULL
+                    FOREIGN KEY (user_id) REFERENCES users (user_id) ON DELETE CASCADE
                 )
             """)
             
-            # === ТАБЛИЦЫ ДЛЯ ПОЛНОГО КОНТЕКСТА ===
+            # === НОВЫЕ ТАБЛИЦЫ ДЛЯ ПОЛНОГО КОНТЕКСТА ===
             
+            # Полная история всех анализов
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS plant_analyses_full (
                     id SERIAL PRIMARY KEY,
@@ -126,6 +106,7 @@ class PlantDatabase:
                 )
             """)
             
+            # История вопросов и ответов
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS plant_qa_history (
                     id SERIAL PRIMARY KEY,
@@ -144,6 +125,7 @@ class PlantDatabase:
                 )
             """)
             
+            # История проблем и решений
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS plant_problems_log (
                     id SERIAL PRIMARY KEY,
@@ -163,6 +145,7 @@ class PlantDatabase:
                 )
             """)
             
+            # Паттерны ухода пользователя (обучение)
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS plant_user_patterns (
                     id SERIAL PRIMARY KEY,
@@ -178,6 +161,7 @@ class PlantDatabase:
                 )
             """)
             
+            # Условия содержания растения
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS plant_environment (
                     id SERIAL PRIMARY KEY,
@@ -196,6 +180,7 @@ class PlantDatabase:
                 )
             """)
             
+            # Таблица истории состояний растений
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS plant_state_history (
                     id SERIAL PRIMARY KEY,
@@ -213,6 +198,26 @@ class PlantDatabase:
                     manual_event BOOLEAN DEFAULT FALSE,
                     event_type TEXT,
                     FOREIGN KEY (plant_id) REFERENCES plants (id) ON DELETE CASCADE,
+                    FOREIGN KEY (user_id) REFERENCES users (user_id) ON DELETE CASCADE
+                )
+            """)
+            
+            # Остальные таблицы
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS growing_plants (
+                    id SERIAL PRIMARY KEY,
+                    user_id BIGINT NOT NULL,
+                    plant_name TEXT NOT NULL,
+                    growth_method TEXT NOT NULL,
+                    growing_plan TEXT NOT NULL,
+                    task_calendar JSONB,
+                    current_stage INTEGER DEFAULT 0,
+                    total_stages INTEGER DEFAULT 4,
+                    started_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    estimated_completion DATE,
+                    status TEXT DEFAULT 'active',
+                    notes TEXT,
+                    photo_file_id TEXT,
                     FOREIGN KEY (user_id) REFERENCES users (user_id) ON DELETE CASCADE
                 )
             """)
@@ -259,7 +264,6 @@ class PlantDatabase:
                 )
             """)
             
-            # ИСПРАВЛЕНО: Таблица reminders с правильной структурой (без ON CONFLICT в CREATE TABLE)
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS reminders (
                     id SERIAL PRIMARY KEY,
@@ -295,7 +299,7 @@ class PlantDatabase:
                 )
             """)
             
-            # Добавляем новые колонки если их нет
+            # Добавляем новые колонки
             try:
                 await conn.execute("ALTER TABLE plants ADD COLUMN IF NOT EXISTS current_state TEXT DEFAULT 'healthy'")
                 await conn.execute("ALTER TABLE plants ADD COLUMN IF NOT EXISTS state_changed_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
@@ -310,20 +314,7 @@ class PlantDatabase:
             except Exception as e:
                 logger.info(f"Колонки уже существуют: {e}")
             
-            # ИСПРАВЛЕНО: Правильные unique constraints для reminders
-            await conn.execute("""
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_reminders_unique_plant_active 
-                ON reminders (user_id, plant_id, reminder_type)
-                WHERE is_active = TRUE AND plant_id IS NOT NULL
-            """)
-            
-            await conn.execute("""
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_reminders_unique_growing_active 
-                ON reminders (user_id, growing_plant_id, reminder_type)
-                WHERE is_active = TRUE AND growing_plant_id IS NOT NULL
-            """)
-            
-            # Обычные индексы для оптимизации
+            # Индексы для оптимизации
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_plants_user_id ON plants (user_id)")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_plants_state ON plants (current_state)")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_plant_state_history_plant_id ON plant_state_history (plant_id)")
@@ -338,6 +329,36 @@ class PlantDatabase:
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_growth_stages_growing_plant_id ON growth_stages (growing_plant_id)")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_growth_diary_growing_plant_id ON growth_diary (growing_plant_id)")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_feedback_user_id ON feedback (user_id)")
+
+            # === МИГРАЦИЯ ДЛЯ СИСТЕМЫ СТАТИСТИКИ ===
+            logger.info("📊 Применение миграции для системы статистики...")
+
+            await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_activity TIMESTAMP")
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_last_activity ON users(last_activity DESC)")
+
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS daily_stats (
+                    id SERIAL PRIMARY KEY,
+                    stat_date DATE UNIQUE NOT NULL,
+                    total_users INTEGER NOT NULL DEFAULT 0,
+                    new_users INTEGER NOT NULL DEFAULT 0,
+                    active_users INTEGER NOT NULL DEFAULT 0,
+                    users_watered INTEGER NOT NULL DEFAULT 0,
+                    users_added_plants INTEGER NOT NULL DEFAULT 0,
+                    total_waterings INTEGER NOT NULL DEFAULT 0,
+                    total_plants_added INTEGER NOT NULL DEFAULT 0,
+                    analyses_count INTEGER NOT NULL DEFAULT 0,
+                    questions_count INTEGER NOT NULL DEFAULT 0,
+                    growing_started INTEGER NOT NULL DEFAULT 0,
+                    feedback_count INTEGER NOT NULL DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_daily_stats_date ON daily_stats(stat_date DESC)")
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_daily_stats_created ON daily_stats(created_at DESC)")
+
+            logger.info("✅ Миграция для системы статистики применена")
     
     def extract_plant_name_from_analysis(self, analysis_text: str) -> str:
         """Извлекает название растения из текста анализа"""
@@ -711,25 +732,21 @@ class PlantDatabase:
                 WHERE user_id = $1 AND id = $2
             """, user_id, plant_id)
     
-    # === МЕТОДЫ ДЛЯ НАПОМИНАНИЙ (ИСПРАВЛЕНО) ===
+    # === МЕТОДЫ ДЛЯ НАПОМИНАНИЙ ===
     
     async def create_reminder(self, user_id: int, plant_id: int, reminder_type: str, next_date: datetime):
-        """ИСПРАВЛЕНО: Создать напоминание с транзакцией"""
+        """Создать напоминание"""
         async with self.pool.acquire() as conn:
-            async with conn.transaction():
-                # Деактивируем все старые напоминания этого типа
-                await conn.execute("""
-                    UPDATE reminders 
-                    SET is_active = FALSE 
-                    WHERE user_id = $1 AND plant_id = $2 
-                      AND reminder_type = $3 AND is_active = TRUE
-                """, user_id, plant_id, reminder_type)
-                
-                # Создаем новое напоминание
-                await conn.execute("""
-                    INSERT INTO reminders (user_id, plant_id, reminder_type, next_date)
-                    VALUES ($1, $2, $3, $4)
-                """, user_id, plant_id, reminder_type, next_date)
+            await conn.execute("""
+                UPDATE reminders 
+                SET is_active = FALSE 
+                WHERE user_id = $1 AND plant_id = $2 AND reminder_type = $3 AND is_active = TRUE
+            """, user_id, plant_id, reminder_type)
+            
+            await conn.execute("""
+                INSERT INTO reminders (user_id, plant_id, reminder_type, next_date)
+                VALUES ($1, $2, $3, $4)
+            """, user_id, plant_id, reminder_type, next_date)
     
     # === МЕТОДЫ ДЛЯ ВЫРАЩИВАНИЯ ===
     
@@ -837,22 +854,19 @@ class PlantDatabase:
     
     async def create_growing_reminder(self, growing_id: int, user_id: int, reminder_type: str, 
                                     next_date: datetime, stage_number: int = None, task_day: int = None):
-        """ИСПРАВЛЕНО: Создать напоминание для выращивания с транзакцией"""
+        """Создать напоминание для выращивания"""
         async with self.pool.acquire() as conn:
-            async with conn.transaction():
-                # Деактивируем старые напоминания этого типа
-                await conn.execute("""
-                    UPDATE reminders 
-                    SET is_active = FALSE 
-                    WHERE growing_plant_id = $1 AND reminder_type = $2 AND is_active = TRUE
-                """, growing_id, reminder_type)
-                
-                # Создаем новое напоминание
-                await conn.execute("""
-                    INSERT INTO reminders 
-                    (user_id, growing_plant_id, reminder_type, next_date, stage_number, task_day)
-                    VALUES ($1, $2, $3, $4, $5, $6)
-                """, user_id, growing_id, reminder_type, next_date, stage_number, task_day)
+            await conn.execute("""
+                UPDATE reminders 
+                SET is_active = FALSE 
+                WHERE growing_plant_id = $1 AND reminder_type = $2 AND is_active = TRUE
+            """, growing_id, reminder_type)
+            
+            await conn.execute("""
+                INSERT INTO reminders 
+                (user_id, growing_plant_id, reminder_type, next_date, stage_number, task_day)
+                VALUES ($1, $2, $3, $4, $5, $6)
+            """, user_id, growing_id, reminder_type, next_date, stage_number, task_day)
     
     # === МЕТОДЫ ДЛЯ ОБРАТНОЙ СВЯЗИ ===
     
