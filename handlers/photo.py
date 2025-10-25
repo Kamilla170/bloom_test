@@ -41,14 +41,10 @@ async def handle_state_update_photo(message: types.Message, state: FSMContext, b
         photo = message.photo[-1]
         file = await bot.get_file(photo.file_id)
         
-        # ИСПРАВЛЕНО: правильная обработка bot.download()
-        image_data = await bot.download(file)
-        
-        # Конвертируем в bytes если получили BytesIO
-        if isinstance(image_data, BytesIO):
-            image_bytes = image_data.getvalue()
-        else:
-            image_bytes = image_data
+        # Скачиваем файл
+        file_bytes = BytesIO()
+        await bot.download_file(file.file_path, file_bytes)
+        image_bytes = file_bytes.getvalue()
         
         from database import get_db
         db = await get_db()
@@ -134,15 +130,10 @@ async def handle_photo(message: types.Message, bot):
         photo = message.photo[-1]
         file = await bot.get_file(photo.file_id)
         
-        # ИСПРАВЛЕНО: правильная обработка bot.download()
-        # В aiogram 3.x может вернуть BytesIO или bytes в зависимости от версии
-        image_data = await bot.download(file)
-        
-        # Конвертируем в bytes если получили BytesIO
-        if isinstance(image_data, BytesIO):
-            image_bytes = image_data.getvalue()
-        else:
-            image_bytes = image_data
+        # Скачиваем файл
+        file_bytes = BytesIO()
+        await bot.download_file(file.file_path, file_bytes)
+        image_bytes = file_bytes.getvalue()
         
         user_question = message.caption if message.caption else None
         
