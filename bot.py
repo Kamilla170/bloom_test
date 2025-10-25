@@ -25,7 +25,7 @@ from services.admin_stats_service import send_daily_report_to_admins
 # Импорты handlers
 from handlers import (
     commands, photo, callbacks, plants, 
-    questions, feedback, onboarding, growing
+    questions, feedback, growing
 )
 
 # Импорт middleware
