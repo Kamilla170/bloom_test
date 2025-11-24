@@ -37,8 +37,14 @@ async def save_analyzed_plant(user_id: int, analysis_data: dict) -> dict:
             plant_name=analysis_data.get("plant_name", "Неизвестное растение")
         )
         
-        # Устанавливаем скорректированный интервал полива
-        await db.update_plant_watering_interval(plant_id, adjusted_interval)
+        # ВАЖНО: Сохраняем И базовый И скорректированный интервалы
+        async with db.pool.acquire() as conn:
+            await conn.execute("""
+                UPDATE plants 
+                SET base_watering_interval = $1,
+                    watering_interval = $2
+                WHERE id = $3
+            """, base_interval, adjusted_interval, plant_id)
         
         # Сохраняем состояние растения
         current_state = state_info.get('current_state', 'healthy')
@@ -190,23 +196,32 @@ async def water_plant(user_id: int, plant_id: int) -> dict:
         
         await db.update_watering(user_id, plant_id)
         
-        # Получаем интервал с учетом сезона
-        base_interval = plant.get('watering_interval', 5)
+        # Получаем базовый интервал и пересчитываем с учетом текущего сезона
+        base_interval = plant.get('base_watering_interval') or plant.get('watering_interval', 5)
         season_info = get_current_season()
+        adjusted_interval = adjust_watering_interval(base_interval, season_info['season'])
         
-        # Интервал уже должен быть скорректирован в БД, но на всякий случай проверяем
-        interval = base_interval
+        # Обновляем скорректированный интервал в БД
+        async with db.pool.acquire() as conn:
+            await conn.execute("""
+                UPDATE plants 
+                SET watering_interval = $1
+                WHERE id = $2
+            """, adjusted_interval, plant_id)
         
-        await create_plant_reminder(plant_id, user_id, interval)
+        # Создаем новое напоминание с актуальным сезонным интервалом
+        await create_plant_reminder(plant_id, user_id, adjusted_interval)
         
         current_time = get_moscow_now().strftime("%d.%m.%Y в %H:%M")
         plant_name = plant['display_name']
+        
+        logger.info(f"💧 Растение {plant_name} (ID={plant_id}) полито. Сезон: {season_info['season_ru']}, Базовый интервал: {base_interval}, Текущий: {adjusted_interval}")
         
         return {
             "success": True,
             "plant_name": plant_name,
             "time": current_time,
-            "next_watering_days": interval
+            "next_watering_days": adjusted_interval
         }
         
     except Exception as e:
