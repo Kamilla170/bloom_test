@@ -48,7 +48,8 @@ async def send_watering_reminders(bot):
             """)
             logger.info(f"📊 Всего растений с активными напоминаниями: {total_plants}")
             
-            # ИСПРАВЛЕНО: Используем next_date из reminders
+            # КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: Напоминания приходят каждый день пока next_date в прошлом
+            # и растение не полито (last_sent ограничивает до 1 раза в день)
             plants_to_water = await conn.fetch("""
                 SELECT p.id, p.user_id, 
                        COALESCE(p.custom_name, p.plant_name, 'Растение #' || p.id) as display_name,
@@ -78,10 +79,12 @@ async def send_watering_reminders(bot):
             if len(plants_to_water) > 0:
                 logger.info("📋 СПИСОК РАСТЕНИЙ ДЛЯ НАПОМИНАНИЙ:")
                 for i, plant in enumerate(plants_to_water, 1):
+                    days_overdue = (moscow_date - plant['next_date'].date()).days
                     logger.info(f"   {i}. ID={plant['id']}, User={plant['user_id']}, "
                               f"Название='{plant['display_name']}', "
-                              f"NextDate={plant['next_date']}, "
-                              f"LastSent={plant['last_sent']}")
+                              f"Просрочено на {days_overdue} дней, "
+                              f"NextDate={plant['next_date'].date()}, "
+                              f"LastSent={plant['last_sent'].date() if plant['last_sent'] else 'никогда'}")
             else:
                 logger.info("✅ Нет растений требующих напоминания на эту дату")
             
@@ -112,6 +115,9 @@ async def send_single_watering_reminder(bot, plant_row):
         
         moscow_now = get_moscow_now()
         
+        # Вычисляем сколько дней просрочено
+        days_overdue = (moscow_now.date() - plant_row['next_date'].date()).days
+        
         if plant_row['last_watered']:
             days_ago = (moscow_now.date() - plant_row['last_watered'].date()).days
             if days_ago == 0:
@@ -129,7 +135,13 @@ async def send_single_watering_reminder(bot, plant_row):
         message_text = f"💧 <b>Время полить растение!</b>\n\n"
         message_text += f"{state_emoji} <b>{plant_name}</b>\n"
         message_text += f"📊 Состояние: {state_name}\n"
-        message_text += f"⏰ {time_info}\n\n"
+        message_text += f"⏰ {time_info}\n"
+        
+        # Показываем насколько просрочен полив
+        if days_overdue > 0:
+            message_text += f"⚠️ <b>Просрочено на {days_overdue} {'день' if days_overdue == 1 else 'дня' if days_overdue < 5 else 'дней'}</b>\n"
+        
+        message_text += f"\n"
         
         # Рекомендации по состоянию
         if current_state == 'flowering':
@@ -144,7 +156,7 @@ async def send_single_watering_reminder(bot, plant_row):
         
         keyboard = watering_reminder_actions(plant_id)
         
-        logger.info(f"📤 Отправка напоминания: User={user_id}, Plant='{plant_name}' (ID={plant_id})")
+        logger.info(f"📤 Отправка напоминания: User={user_id}, Plant='{plant_name}' (ID={plant_id}), Просрочено={days_overdue} дней")
         
         await bot.send_photo(
             chat_id=user_id,
@@ -154,22 +166,20 @@ async def send_single_watering_reminder(bot, plant_row):
             reply_markup=keyboard
         )
         
-        # Обновляем last_sent и планируем следующее напоминание
+        # КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: Обновляем ТОЛЬКО last_sent
+        # НЕ обновляем next_date - оно останется в прошлом до полива
         db = await get_db()
         moscow_now_naive = moscow_now.replace(tzinfo=None)
-        next_reminder = moscow_now + timedelta(days=interval)
-        next_reminder_naive = next_reminder.replace(tzinfo=None)
         
         async with db.pool.acquire() as conn:
             await conn.execute("""
                 UPDATE reminders
                 SET last_sent = $1,
-                    send_count = COALESCE(send_count, 0) + 1,
-                    next_date = $2
-                WHERE id = $3
-            """, moscow_now_naive, next_reminder_naive, plant_row['reminder_id'])
+                    send_count = COALESCE(send_count, 0) + 1
+                WHERE id = $2
+            """, moscow_now_naive, plant_row['reminder_id'])
         
-        logger.info(f"✅ Напоминание отправлено успешно! Следующее: {next_reminder.date()}")
+        logger.info(f"✅ Напоминание отправлено! Будет повторяться каждый день до полива.")
         
     except Exception as e:
         logger.error(f"❌ Ошибка отправки напоминания для растения {plant_row.get('id')}: {e}", exc_info=True)
@@ -351,10 +361,10 @@ async def send_monthly_photo_reminder(bot, user_id: int, plants: list):
 {plants_text}
 
 💡 <b>Зачем это нужно?</b>
-• Отслеживание изменений и роста
-• Своевременное выявление проблем
-• История развития ваших растений
-• Корректировка ухода по состоянию
+- Отслеживание изменений и роста
+- Своевременное выявление проблем
+- История развития ваших растений
+- Корректировка ухода по состоянию
 
 📷 <b>Что делать:</b>
 Просто пришлите новое фото каждого растения!
