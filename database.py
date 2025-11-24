@@ -308,10 +308,14 @@ class PlantDatabase:
                 await conn.execute("ALTER TABLE plants ADD COLUMN IF NOT EXISTS growth_stage TEXT DEFAULT 'young'")
                 await conn.execute("ALTER TABLE plants ADD COLUMN IF NOT EXISTS last_photo_analysis TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
                 await conn.execute("ALTER TABLE plants ADD COLUMN IF NOT EXISTS environment_data JSONB")
+                await conn.execute("ALTER TABLE plants ADD COLUMN IF NOT EXISTS base_watering_interval INTEGER DEFAULT 5")
                 await conn.execute("ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS monthly_photo_reminder BOOLEAN DEFAULT TRUE")
                 await conn.execute("ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS last_monthly_reminder TIMESTAMP")
                 await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS onboarding_completed BOOLEAN DEFAULT FALSE")
                 await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS care_style_profile JSONB")
+                await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_activity TIMESTAMP")
+                
+                logger.info("✅ Все дополнительные колонки добавлены")
             except Exception as e:
                 logger.info(f"Колонки уже существуют: {e}")
             
@@ -330,12 +334,10 @@ class PlantDatabase:
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_growth_stages_growing_plant_id ON growth_stages (growing_plant_id)")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_growth_diary_growing_plant_id ON growth_diary (growing_plant_id)")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_feedback_user_id ON feedback (user_id)")
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_last_activity ON users(last_activity DESC)")
 
             # === МИГРАЦИЯ ДЛЯ СИСТЕМЫ СТАТИСТИКИ ===
             logger.info("📊 Применение миграции для системы статистики...")
-
-            await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_activity TIMESTAMP")
-            await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_last_activity ON users(last_activity DESC)")
 
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS daily_stats (
@@ -621,6 +623,7 @@ class PlantDatabase:
                        saved_date, last_watered, 
                        COALESCE(watering_count, 0) as watering_count,
                        COALESCE(watering_interval, 5) as watering_interval,
+                       COALESCE(base_watering_interval, watering_interval, 5) as base_watering_interval,
                        COALESCE(reminder_enabled, TRUE) as reminder_enabled,
                        notes, plant_type, growing_id,
                        current_state, state_changed_date, state_changes_count,
