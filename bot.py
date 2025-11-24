@@ -20,12 +20,11 @@ from services.reminder_service import (
     check_and_send_reminders, 
     check_monthly_photo_reminders
 )
-from services.admin_stats_service import send_daily_report_to_admins
 
 # Импорты handlers
 from handlers import (
     commands, photo, callbacks, plants, 
-    questions, feedback, growing
+    questions, feedback, onboarding, growing
 )
 
 # Импорт middleware
@@ -45,6 +44,10 @@ scheduler = AsyncIOScheduler(timezone=MOSCOW_TZ)
 async def on_startup():
     """Инициализация при запуске"""
     try:
+        logger.info("=" * 70)
+        logger.info("🌱 BLOOM AI BOT - ИНИЦИАЛИЗАЦИЯ")
+        logger.info("=" * 70)
+        
         # Валидация конфигурации
         validate_config()
         
@@ -77,9 +80,13 @@ async def on_startup():
             logger.info(f"✅ Webhook установлен: {WEBHOOK_URL}/webhook")
         else:
             logger.info("✅ Polling mode активирован")
+        
+        logger.info("=" * 70)
+        logger.info("✅ ИНИЦИАЛИЗАЦИЯ ЗАВЕРШЕНА")
+        logger.info("=" * 70)
             
     except Exception as e:
-        logger.error(f"❌ Ошибка запуска: {e}")
+        logger.error(f"❌ Ошибка запуска: {e}", exc_info=True)
         raise
 
 
@@ -116,54 +123,76 @@ def register_middleware():
 
 def register_handlers():
     """Регистрация всех handlers"""
+    # Регистрация routers в правильном порядке
     dp.include_router(commands.router)
     dp.include_router(photo.router)
     dp.include_router(plants.router)
     dp.include_router(questions.router)
     dp.include_router(feedback.router)
+    dp.include_router(onboarding.router)
     dp.include_router(growing.router)
-    dp.include_router(callbacks.router)
+    dp.include_router(callbacks.router)  # Callbacks последними как fallback
     
     logger.info("✅ Handlers зарегистрированы")
 
 
 def setup_scheduler():
     """Настройка планировщика задач"""
+    logger.info("")
+    logger.info("=" * 70)
+    logger.info("⏰ НАСТРОЙКА ПЛАНИРОВЩИКА ЗАДАЧ")
+    logger.info("=" * 70)
+    
+    from utils.time_utils import get_moscow_now
+    moscow_now = get_moscow_now()
+    logger.info(f"🕐 Текущее время (МСК): {moscow_now.strftime('%d.%m.%Y %H:%M:%S')}")
+    logger.info(f"🌍 Часовой пояс: {MOSCOW_TZ}")
+    
     # Ежедневные напоминания о поливе в 9:00 МСК
     scheduler.add_job(
-        lambda: check_and_send_reminders(bot),
+        check_and_send_reminders,
         'cron',
         hour=9,
         minute=0,
+        args=[bot],
         id='reminder_check',
         replace_existing=True
     )
+    logger.info(f"✅ Задача 'reminder_check' добавлена: ежедневно в 09:00 МСК")
     
     # Месячные напоминания об обновлении фото в 10:00 МСК
     scheduler.add_job(
-        lambda: check_monthly_photo_reminders(bot),
+        check_monthly_photo_reminders,
         'cron',
         hour=10,
         minute=0,
+        args=[bot],
         id='monthly_reminder_check',
         replace_existing=True
     )
+    logger.info(f"✅ Задача 'monthly_reminder_check' добавлена: ежедневно в 10:00 МСК")
     
-    # Ежедневная статистика для администраторов в 9:00 МСК
-    scheduler.add_job(
-        lambda: send_daily_report_to_admins(bot),
-        'cron',
-        hour=9,
-        minute=0,
-        id='daily_stats_report',
-        replace_existing=True
-    )
-    
+    # КРИТИЧЕСКИ ВАЖНО: Запускаем планировщик
     scheduler.start()
-    logger.info("🔔 Планировщик запущен")
-    logger.info("⏰ Ежедневные напоминания: 9:00 МСК")
-    logger.info("📸 Месячные напоминания: 10:00 МСК")
-    logger.info("📊 Ежедневная статистика: 9:00 МСК")
+    logger.info("")
+    logger.info("🚀 ПЛАНИРОВЩИК ЗАПУЩЕН И АКТИВЕН")
+    
+    # Проверяем что планировщик действительно работает
+    if scheduler.running:
+        logger.info("✅ Статус планировщика: РАБОТАЕТ")
+        logger.info(f"📊 Активных задач: {len(scheduler.get_jobs())}")
+        
+        # Выводим список всех задач С ВРЕМЕНЕМ после запуска
+        logger.info("")
+        logger.info("📋 СПИСОК АКТИВНЫХ ЗАДАЧ:")
+        for job in scheduler.get_jobs():
+            # Теперь next_run_time доступен после start()
+            next_run = job.next_run_time.strftime('%d.%m.%Y %H:%M:%S') if job.next_run_time else 'не запланировано'
+            logger.info(f"   • {job.id}: следующий запуск {next_run}")
+    else:
+        logger.error("❌ ПЛАНИРОВЩИК НЕ ЗАПУСТИЛСЯ!")
+    
+    logger.info("=" * 70)
 
 
 async def webhook_handler(request):
@@ -187,17 +216,39 @@ async def webhook_handler(request):
 
 async def health_check(request):
     """Health check endpoint"""
+    from utils.time_utils import get_moscow_now
+    moscow_now = get_moscow_now()
+    
+    # Проверяем статус планировщика
+    scheduler_status = "running" if scheduler.running else "stopped"
+    jobs_count = len(scheduler.get_jobs()) if scheduler.running else 0
+    
+    next_jobs = []
+    if scheduler.running:
+        for job in scheduler.get_jobs():
+            next_jobs.append({
+                "id": job.id,
+                "next_run": str(job.next_run_time)
+            })
+    
     return web.json_response({
         "status": "healthy", 
         "bot": "Bloom AI", 
-        "version": "5.1 - Stats System"
+        "version": "5.4 - Stats Removed",
+        "time_msk": moscow_now.strftime('%Y-%m-%d %H:%M:%S'),
+        "timezone": str(MOSCOW_TZ),
+        "scheduler": {
+            "status": scheduler_status,
+            "jobs_count": jobs_count,
+            "next_jobs": next_jobs
+        }
     })
 
 
 async def main():
     """Main функция"""
     try:
-        logger.info("🚀 Запуск Bloom AI v5.1 (Stats System)...")
+        logger.info("🚀 Запуск Bloom AI v5.4 (Stats Removed)...")
         
         await on_startup()
         
@@ -213,8 +264,13 @@ async def main():
             site = web.TCPSite(runner, '0.0.0.0', PORT)
             await site.start()
             
-            logger.info(f"🚀 Bloom AI v5.1 запущен на порту {PORT}")
-            logger.info(f"✅ Stats System активирована!")
+            logger.info("")
+            logger.info("=" * 70)
+            logger.info(f"🚀 BLOOM AI v5.4 УСПЕШНО ЗАПУЩЕН")
+            logger.info(f"🌐 Порт: {PORT}")
+            logger.info(f"📡 Webhook: {WEBHOOK_URL}/webhook")
+            logger.info(f"❤️ Health check: {WEBHOOK_URL}/health")
+            logger.info("=" * 70)
             
             try:
                 await asyncio.Future()
@@ -225,8 +281,12 @@ async def main():
                 await on_shutdown()
         else:
             # Polling mode
-            logger.info("🤖 Запуск в режиме polling")
+            logger.info("")
+            logger.info("=" * 70)
+            logger.info("🤖 BLOOM AI v5.4 В РЕЖИМЕ POLLING")
             logger.info("⏳ Ожидание сообщений от пользователей...")
+            logger.info("=" * 70)
+            
             try:
                 await dp.start_polling(bot, drop_pending_updates=True)
             except KeyboardInterrupt:
