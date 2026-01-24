@@ -1010,9 +1010,9 @@ class PlantDatabase:
                 for plant_row in plant_ids:
                     try:
                         await conn.execute("""
-                            INSERT INTO care_history (plant_id, user_id, action_type, notes)
-                                VALUES ($1, $2, 'watered', 'Растение полито (массовый полив)')
-                            """, plant_row['id'], user_id)
+    INSERT INTO care_history (plant_id, user_id, action_type, notes)
+    VALUES ($1, $2, 'watered', 'Растение полито (массовый полив)')
+""", plant_row['id'], user_id)
                     except Exception as e:
                         logger.error(f"Ошибка добавления в историю: {e}")
             
