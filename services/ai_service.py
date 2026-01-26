@@ -114,7 +114,7 @@ def extract_watering_info(analysis_text: str) -> dict:
 
 
 async def analyze_with_openai_advanced(image_data: bytes, user_question: str = None, previous_state: str = None) -> dict:
-    """Продвинутый анализ с определением состояния через OpenAI"""
+    """Продвинутый анализ с определением состояния через OpenAI - GPT-4o (vision)"""
     if not openai_client:
         return {"success": False, "error": "OpenAI API недоступен"}
     
@@ -122,7 +122,7 @@ async def analyze_with_openai_advanced(image_data: bytes, user_question: str = N
         # Получаем информацию о текущем сезоне
         season_data = get_current_season()
         
-        # ИСПРАВЛЕНО: Формируем рекомендации по подкормке на основе сезона
+        # Формируем рекомендации по подкормке на основе сезона
         feeding_recommendations = {
             'winter': 'Прекратить подкормки или минимизировать до 1 раза в месяц половинной дозой',
             'spring': 'Начать подкормки с половинной дозы, постепенно увеличивая до полной каждые 2 недели',
@@ -130,7 +130,7 @@ async def analyze_with_openai_advanced(image_data: bytes, user_question: str = N
             'autumn': 'Постепенно сокращать подкормки, с октября прекратить для большинства видов'
         }
         
-        # ИСПРАВЛЕНО: Вычисляем числовую корректировку полива
+        # Вычисляем числовую корректировку полива
         water_adjustment_days = 0
         if season_data['season'] == 'winter':
             water_adjustment_days = +5  # Зимой поливать реже
@@ -144,15 +144,15 @@ async def analyze_with_openai_advanced(image_data: bytes, user_question: str = N
         optimized_image = await optimize_image_for_analysis(image_data, high_quality=True)
         base64_image = base64.b64encode(optimized_image).decode('utf-8')
         
-        # ИСПРАВЛЕНО: Форматируем промпт с правильными ключами
+        # Форматируем промпт с правильными ключами
         prompt = PLANT_IDENTIFICATION_PROMPT.format(
-            season_name=season_data['season_ru'],  # ✅ 'Зима'
-            season_description=season_data['growth_phase'],  # ✅ 'Период покоя'
-            season_water_note=season_data['watering_adjustment'],  # ✅ строка с описанием
-            season_light_note=season_data['light_hours'],  # ✅ описание светового дня
-            season_temperature_note=season_data['temperature_note'],  # ✅ рекомендации по температуре
-            season_feeding_note=feeding_recommendations.get(season_data['season'], 'Стандартный режим'),  # ✅ рекомендации по подкормке
-            season_water_adjustment=f"{water_adjustment_days:+d} дня к базовому интервалу"  # ✅ числовая корректировка
+            season_name=season_data['season_ru'],
+            season_description=season_data['growth_phase'],
+            season_water_note=season_data['watering_adjustment'],
+            season_light_note=season_data['light_hours'],
+            season_temperature_note=season_data['temperature_note'],
+            season_feeding_note=feeding_recommendations.get(season_data['season'], 'Стандартный режим'),
+            season_water_adjustment=f"{water_adjustment_days:+d} дня к базовому интервалу"
         )
         
         if previous_state:
@@ -161,8 +161,9 @@ async def analyze_with_openai_advanced(image_data: bytes, user_question: str = N
         if user_question:
             prompt += f"\n\nДополнительный вопрос пользователя: {user_question}"
         
+        # ДЛЯ VISION ИСПОЛЬЗУЕМ GPT-4o
         response = await openai_client.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-4o",  # ← GPT-4o для работы с изображениями
             messages=[
                 {
                     "role": "system",
@@ -212,12 +213,12 @@ async def analyze_with_openai_advanced(image_data: bytes, user_question: str = N
         # Извлекаем состояние
         state_info = extract_plant_state_from_analysis(raw_analysis)
         
-        # ИСПРАВЛЕНО: Применяем сезонную корректировку
+        # Применяем сезонную корректировку
         state_info['season_adjustment'] = water_adjustment_days
         
         formatted_analysis = format_plant_analysis(raw_analysis, confidence, state_info)
         
-        logger.info(f"✅ Анализ завершен. Сезон: {season_data['season_ru']}, Состояние: {state_info['current_state']}, Уверенность: {confidence}%")
+        logger.info(f"✅ Анализ завершен (GPT-4o vision). Сезон: {season_data['season_ru']}, Состояние: {state_info['current_state']}, Уверенность: {confidence}%")
         
         return {
             "success": True,
@@ -231,7 +232,7 @@ async def analyze_with_openai_advanced(image_data: bytes, user_question: str = N
         }
         
     except Exception as e:
-        logger.error(f"❌ OpenAI error: {e}", exc_info=True)  # ИСПРАВЛЕНО: добавлен exc_info для полного стека
+        logger.error(f"❌ OpenAI error: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
 
 
@@ -260,7 +261,7 @@ async def analyze_plant_image(image_data: bytes, user_question: str = None,
     # Fallback текст с учетом сезона
     season_data = get_current_season()
     
-    # ИСПРАВЛЕНО: вычисляем корректировку для fallback
+    # Вычисляем корректировку для fallback
     water_adjustment_days = 0
     if season_data['season'] == 'winter':
         water_adjustment_days = +5
@@ -303,7 +304,7 @@ async def analyze_plant_image(image_data: bytes, user_question: str = None,
 
 
 async def answer_plant_question(question: str, plant_context: str = None) -> str:
-    """Ответить на вопрос о растении с контекстом"""
+    """Ответить на вопрос о растении с контекстом - GPT-5.1 для текста"""
     if not openai_client:
         return "❌ OpenAI API недоступен"
     
@@ -377,8 +378,9 @@ async def answer_plant_question(question: str, plant_context: str = None) -> str
 
 ОБЯЗАТЕЛЬНО учитывайте текущий сезон в рекомендациях по поливу и уходу!"""
         
+        # ДЛЯ ТЕКСТОВЫХ ВОПРОСОВ ИСПОЛЬЗУЕМ GPT-5.1
         response = await openai_client.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-5.1",  # ← GPT-5.1 для текстовых запросов
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
@@ -389,7 +391,7 @@ async def answer_plant_question(question: str, plant_context: str = None) -> str
         
         answer = response.choices[0].message.content
         
-        logger.info(f"✅ OpenAI ответил с контекстом (сезон: {season_info['season_ru']})")
+        logger.info(f"✅ GPT-5.1 ответил с контекстом (сезон: {season_info['season_ru']})")
         return answer
         
     except Exception as e:
@@ -398,7 +400,7 @@ async def answer_plant_question(question: str, plant_context: str = None) -> str
 
 
 async def generate_growing_plan(plant_name: str) -> tuple:
-    """Генерация плана выращивания через OpenAI"""
+    """Генерация плана выращивания через OpenAI - GPT-5.1 для текста"""
     if not openai_client:
         return None, None
     
@@ -442,8 +444,9 @@ async def generate_growing_plan(plant_name: str) -> tuple:
 КАЛЕНДАРЬ_ЗАДАЧ: [структурированный JSON с задачами по дням]
 """
         
+        # ДЛЯ ГЕНЕРАЦИИ ПЛАНОВ ИСПОЛЬЗУЕМ GPT-5.1
         response = await openai_client.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-5.1",  # ← GPT-5.1 для текстовых запросов
             messages=[
                 {
                     "role": "system", 
@@ -494,6 +497,7 @@ async def generate_growing_plan(plant_name: str) -> tuple:
             }
         }
         
+        logger.info(f"✅ План выращивания создан через GPT-5.1")
         return plan_text, task_calendar
         
     except Exception as e:
