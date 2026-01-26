@@ -331,7 +331,7 @@ async def analyze_reasoning_step(vision_result: dict, plant_context: str = None,
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            max_tokens=800,
+            max_completion_tokens=800,  # GPT-5.1 использует max_completion_tokens вместо max_tokens
             temperature=0.3
         )
         
@@ -710,15 +710,23 @@ async def answer_plant_question(question: str, plant_context: str = None) -> dic
         for model_name in models_to_try:
             try:
                 logger.info(f"🔄 Пробую модель: {model_name}")
-                response = await openai_client.chat.completions.create(
-                    model=model_name,
-                    messages=[
+                
+                # GPT-5.1 использует max_completion_tokens, остальные модели - max_tokens
+                api_params = {
+                    "model": model_name,
+                    "messages": [
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt}
                     ],
-                    max_tokens=500,
-                    temperature=0.3
-                )
+                    "temperature": 0.3
+                }
+                
+                if model_name == "gpt-5.1":
+                    api_params["max_completion_tokens"] = 500
+                else:
+                    api_params["max_tokens"] = 500
+                
+                response = await openai_client.chat.completions.create(**api_params)
                 
                 answer = response.choices[0].message.content
                 
@@ -804,7 +812,7 @@ async def generate_growing_plan(plant_name: str) -> tuple:
                 },
                 {"role": "user", "content": prompt}
             ],
-            max_tokens=1200,
+            max_completion_tokens=1200,  # GPT-5.1 использует max_completion_tokens вместо max_tokens
             temperature=0.2
         )
         
