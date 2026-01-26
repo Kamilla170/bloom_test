@@ -166,6 +166,7 @@ async def analyze_vision_step(image_data: bytes, user_question: str = None, prev
         if user_question:
             vision_prompt += f"\n\nДополнительный вопрос пользователя: {user_question}"
         
+        logger.info("📸 Vision анализ: использую модель GPT-4o")
         response = await openai_client.chat.completions.create(
             model="gpt-4o",
             messages=[
@@ -231,7 +232,7 @@ async def analyze_vision_step(image_data: bytes, user_question: str = None, prev
         if not vision_analysis:
             vision_analysis = raw_vision
         
-        logger.info(f"✅ Vision анализ завершен: растение={plant_name}, уверенность={confidence}%")
+        logger.info(f"✅ Vision анализ завершен (модель: GPT-4o, растение={plant_name}, уверенность={confidence}%)")
         
         return {
             "success": True,
@@ -323,6 +324,7 @@ async def analyze_reasoning_step(vision_result: dict, plant_context: str = None,
 ОБЯЗАТЕЛЬНО учитывайте текущий сезон в рекомендациях по поливу и уходу!"""
         
         # Используем GPT-5.1 для reasoning (Chat Completions API)
+        logger.info("🧠 Reasoning анализ: использую модель GPT-5.1")
         response = await openai_client.chat.completions.create(
             model="gpt-5.1",
             messages=[
@@ -338,7 +340,7 @@ async def analyze_reasoning_step(vision_result: dict, plant_context: str = None,
         if not reasoning_text or len(reasoning_text) < 50:
             raise Exception("Некачественный ответ от reasoning модели")
         
-        logger.info(f"✅ Reasoning анализ завершен (сезон: {season_info['season_ru']})")
+        logger.info(f"✅ Reasoning анализ завершен (модель: GPT-5.1, сезон: {season_info['season_ru']})")
         
         # Формируем полный анализ для пользователя
         full_analysis = f"""🌱 <b>Растение:</b> {vision_result.get('plant_name', 'Неизвестное растение')}
@@ -362,7 +364,7 @@ async def analyze_reasoning_step(vision_result: dict, plant_context: str = None,
         logger.error(f"❌ Reasoning анализ ошибка: {e}", exc_info=True)
         # Fallback на более простую модель если gpt-5.1 недоступна
         try:
-            logger.info("🔄 Пробую fallback на gpt-4o для reasoning...")
+            logger.warning("🔄 GPT-5.1 недоступна, использую fallback модель GPT-4o для reasoning")
             response = await openai_client.chat.completions.create(
                 model="gpt-4o",
                 messages=[
@@ -374,6 +376,7 @@ async def analyze_reasoning_step(vision_result: dict, plant_context: str = None,
             )
             
             reasoning_text = response.choices[0].message.content
+            logger.info(f"✅ Reasoning анализ завершен (модель: GPT-4o fallback, сезон: {season_info['season_ru']})")
             full_analysis = f"""🌱 <b>Растение:</b> {vision_result.get('plant_name', 'Неизвестное растение')}
 📊 <b>Уверенность:</b> {vision_result.get('confidence', 50)}%
 
