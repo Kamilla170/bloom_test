@@ -110,11 +110,11 @@ async def handle_question(message: types.Message, state: FSMContext):
             # Сохраняем взаимодействие
             if plant_id:
                 await save_interaction(
-                    plant_id, user_id, message.text, answer,
+                    plant_id, user_id, message.text, answer_text,
                     context_used={"context_length": len(context_text)}
                 )
             
-            await message.reply(answer, parse_mode="HTML" if "<" not in answer else None)
+            await message.reply(answer_text, parse_mode="HTML" if "<" in answer_text else None)
         else:
             await message.reply(
                 "🤔 Не могу дать ответ. Попробуйте переформулировать.",

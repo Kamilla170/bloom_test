@@ -113,6 +113,288 @@ def extract_watering_info(analysis_text: str) -> dict:
     return watering_info
 
 
+async def analyze_vision_step(image_data: bytes, user_question: str = None, previous_state: str = None) -> dict:
+    """ШАГ 1: Vision анализ через GPT-4o - что видно, проблемы, уверенность
+    
+    Returns:
+        dict: {
+            "success": bool,
+            "vision_analysis": str,  # Что видно на фото
+            "possible_problems": str,  # Возможные проблемы
+            "confidence": float,  # Уровень уверенности 0-100
+            "plant_name": str,
+            "raw_observations": str  # Сырые наблюдения для передачи в reasoning
+        }
+    """
+    if not openai_client:
+        return {"success": False, "error": "OpenAI API недоступен"}
+    
+    try:
+        optimized_image = await optimize_image_for_analysis(image_data, high_quality=True)
+        base64_image = base64.b64encode(optimized_image).decode('utf-8')
+        
+        vision_prompt = """Вы - профессиональный ботаник-диагност. Проанализируйте фотографию растения и опишите ТОЛЬКО то, что видно на изображении.
+
+ВАША ЗАДАЧА:
+1. Опишите что видно на фото (морфология, состояние листьев, стеблей, цветов)
+2. Выявите возможные проблемы (пятна, пожелтение, увядание, вредители и т.д.)
+3. Оцените уровень уверенности в своих наблюдениях (0-100%)
+
+ФОРМАТ ОТВЕТА (строго соблюдайте):
+РАСТЕНИЕ: [название или "Неизвестное растение" если не уверены]
+УВЕРЕННОСТЬ: [число от 0 до 100]%
+
+ЧТО ВИДНО:
+- [детальное описание морфологических признаков]
+- [состояние листьев, стеблей, корневой системы если видна]
+- [наличие цветов, бутонов, плодов]
+
+ВОЗМОЖНЫЕ ПРОБЛЕМЫ:
+- [список проблем которые вы видите или "Проблем не обнаружено"]
+- [признаки заболеваний если есть]
+- [признаки вредителей если есть]
+- [признаки неправильного ухода если видны]
+
+ВАЖНО: 
+- Описывайте ТОЛЬКО то, что реально видно на фото
+- Если что-то не видно - укажите "не видно на фото"
+- Будьте объективны и точны"""
+        
+        if previous_state:
+            vision_prompt += f"\n\nПредыдущее состояние растения: {previous_state}. Обратите внимание на изменения."
+        
+        if user_question:
+            vision_prompt += f"\n\nДополнительный вопрос пользователя: {user_question}"
+        
+        response = await openai_client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "Вы - профессиональный ботаник-диагност. Анализируйте только визуальные признаки на фотографии. Будьте точны и объективны."
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": vision_prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{base64_image}",
+                                "detail": "high"
+                            }
+                        }
+                    ]
+                }
+            ],
+            max_tokens=1000,
+            temperature=0.2
+        )
+        
+        raw_vision = response.choices[0].message.content
+        
+        if len(raw_vision) < 50:
+            raise Exception("Некачественный ответ от vision модели")
+        
+        # Извлекаем данные из ответа
+        plant_name = "Неизвестное растение"
+        confidence = 50
+        vision_analysis = ""
+        possible_problems = ""
+        
+        lines = raw_vision.split('\n')
+        current_section = None
+        
+        for line in lines:
+            line = line.strip()
+            
+            if line.startswith("РАСТЕНИЕ:"):
+                plant_name = line.replace("РАСТЕНИЕ:", "").strip()
+            elif line.startswith("УВЕРЕННОСТЬ:"):
+                try:
+                    conf_str = line.replace("УВЕРЕННОСТЬ:", "").strip().replace("%", "")
+                    confidence = float(conf_str)
+                except:
+                    confidence = 50
+            elif line.startswith("ЧТО ВИДНО:"):
+                current_section = "vision"
+                vision_analysis = line.replace("ЧТО ВИДНО:", "").strip() + "\n"
+            elif line.startswith("ВОЗМОЖНЫЕ ПРОБЛЕМЫ:"):
+                current_section = "problems"
+                possible_problems = line.replace("ВОЗМОЖНЫЕ ПРОБЛЕМЫ:", "").strip() + "\n"
+            elif current_section == "vision":
+                vision_analysis += line + "\n"
+            elif current_section == "problems":
+                possible_problems += line + "\n"
+        
+        # Если не удалось извлечь структурированно, используем весь текст
+        if not vision_analysis:
+            vision_analysis = raw_vision
+        
+        logger.info(f"✅ Vision анализ завершен: растение={plant_name}, уверенность={confidence}%")
+        
+        return {
+            "success": True,
+            "vision_analysis": vision_analysis.strip(),
+            "possible_problems": possible_problems.strip() if possible_problems else "Проблем не обнаружено",
+            "confidence": confidence,
+            "plant_name": plant_name,
+            "raw_observations": raw_vision
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Vision анализ ошибка: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
+async def analyze_reasoning_step(vision_result: dict, plant_context: str = None, user_question: str = None) -> dict:
+    """ШАГ 2: Reasoning через GPT-5.1 - объясняет почему, план действий, адаптация
+    
+    Args:
+        vision_result: Результат от analyze_vision_step
+        plant_context: Контекст истории растения (опционально)
+        user_question: Вопрос пользователя (опционально)
+    
+    Returns:
+        dict: {
+            "success": bool,
+            "reasoning": str,  # Объяснение почему
+            "action_plan": str,  # План действий
+            "adapted_recommendations": str,  # Адаптированные рекомендации
+            "full_analysis": str  # Полный анализ для пользователя
+        }
+    """
+    if not openai_client:
+        return {"success": False, "error": "OpenAI API недоступен"}
+    
+    try:
+        # Получаем информацию о сезоне
+        season_info = get_current_season()
+        
+        seasonal_context = f"""
+ТЕКУЩИЙ СЕЗОН: {season_info['season_ru']} ({season_info['month_name_ru']})
+ФАЗА РОСТА: {season_info['growth_phase']}
+СВЕТОВОЙ ДЕНЬ: {season_info['light_hours']}
+КОРРЕКТИРОВКА ПОЛИВА: {season_info['watering_adjustment']}
+
+СЕЗОННЫЕ ОСОБЕННОСТИ:
+{season_info['recommendations']}
+"""
+        
+        system_prompt = """Вы - профессиональный ботаник-консультант с многолетним опытом. Ваша задача - проанализировать визуальные наблюдения и дать глубокое объяснение с планом действий.
+
+СТИЛЬ ОБЩЕНИЯ:
+- Авторитетный, экспертный, но доступный
+- Конкретные рекомендации на основе фактов
+- Обращение на "вы" (профессиональное)
+- Структурированные ответы: диагноз → причина → решение
+
+ВАЖНО: НЕ ИСПОЛЬЗУЙТЕ markdown форматирование (**, *, _). Пишите обычным текстом.
+
+КРИТИЧЕСКИ ВАЖНО: Всегда учитывайте текущий сезон и время года при рекомендациях по поливу и уходу!
+Зимой полив значительно сокращается, летом увеличивается. Игнорирование сезона может погубить растение."""
+
+        user_prompt = f"""ВИЗУАЛЬНЫЕ НАБЛЮДЕНИЯ (от vision модели):
+{vision_result.get('raw_observations', '')}
+
+ЧТО ВИДНО: {vision_result.get('vision_analysis', '')}
+ВОЗМОЖНЫЕ ПРОБЛЕМЫ: {vision_result.get('possible_problems', '')}
+УВЕРЕННОСТЬ: {vision_result.get('confidence', 50)}%
+
+ИСТОРИЯ РАСТЕНИЯ:
+{plant_context if plant_context else "Контекст отсутствует"}
+
+{seasonal_context}
+
+{f'ВОПРОС ПОЛЬЗОВАТЕЛЯ: {user_question}' if user_question else ''}
+
+ВАША ЗАДАЧА:
+1. ОБЪЯСНИТЕ ПОЧЕМУ - проанализируйте визуальные наблюдения и объясните причины проблем или текущего состояния
+2. ДАЙТЕ ПЛАН ДЕЙСТВИЙ - конкретные шаги для решения проблем или улучшения состояния
+3. АДАПТИРУЙТЕ ПОД УСЛОВИЯ - учтите сезон, условия содержания (дом), частоту полива
+
+ФОРМАТ ОТВЕТА (2-4 абзаца БЕЗ нумерации и markdown):
+
+Абзац 1: ОБЪЯСНЕНИЕ ПОЧЕМУ - диагноз ситуации на основе визуальных наблюдений
+Абзац 2: ПЛАН ДЕЙСТВИЙ - конкретные шаги с параметрами (температура, частота, количество)
+Абзац 3: АДАПТАЦИЯ - как адаптировать уход под текущий сезон и условия
+Абзац 4 (при необходимости): КОНТРОЛЬ - когда ожидать результат
+
+ОБЯЗАТЕЛЬНО учитывайте текущий сезон в рекомендациях по поливу и уходу!"""
+        
+        # Используем GPT-5.1 для reasoning (Chat Completions API)
+        response = await openai_client.chat.completions.create(
+            model="gpt-5.1",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            max_tokens=800,
+            temperature=0.3
+        )
+        
+        reasoning_text = response.choices[0].message.content
+        
+        if not reasoning_text or len(reasoning_text) < 50:
+            raise Exception("Некачественный ответ от reasoning модели")
+        
+        logger.info(f"✅ Reasoning анализ завершен (сезон: {season_info['season_ru']})")
+        
+        # Формируем полный анализ для пользователя
+        full_analysis = f"""🌱 <b>Растение:</b> {vision_result.get('plant_name', 'Неизвестное растение')}
+📊 <b>Уверенность:</b> {vision_result.get('confidence', 50)}%
+
+<b>Визуальный анализ:</b>
+{vision_result.get('vision_analysis', '')}
+
+<b>Рекомендации:</b>
+{reasoning_text}"""
+        
+        return {
+            "success": True,
+            "reasoning": reasoning_text,
+            "action_plan": reasoning_text,  # План действий включен в reasoning
+            "adapted_recommendations": reasoning_text,  # Адаптированные рекомендации включены
+            "full_analysis": full_analysis
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Reasoning анализ ошибка: {e}", exc_info=True)
+        # Fallback на более простую модель если gpt-5.1 недоступна
+        try:
+            logger.info("🔄 Пробую fallback на gpt-4o для reasoning...")
+            response = await openai_client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                max_tokens=800,
+                temperature=0.3
+            )
+            
+            reasoning_text = response.choices[0].message.content
+            full_analysis = f"""🌱 <b>Растение:</b> {vision_result.get('plant_name', 'Неизвестное растение')}
+📊 <b>Уверенность:</b> {vision_result.get('confidence', 50)}%
+
+<b>Визуальный анализ:</b>
+{vision_result.get('vision_analysis', '')}
+
+<b>Рекомендации:</b>
+{reasoning_text}"""
+            
+            return {
+                "success": True,
+                "reasoning": reasoning_text,
+                "action_plan": reasoning_text,
+                "adapted_recommendations": reasoning_text,
+                "full_analysis": full_analysis
+            }
+        except Exception as fallback_error:
+            logger.error(f"❌ Fallback reasoning ошибка: {fallback_error}")
+            return {"success": False, "error": str(e)}
+
+
 async def analyze_with_openai_advanced(image_data: bytes, user_question: str = None, previous_state: str = None) -> dict:
     """Продвинутый анализ с определением состояния через OpenAI"""
     if not openai_client:
@@ -236,26 +518,63 @@ async def analyze_with_openai_advanced(image_data: bytes, user_question: str = N
 
 
 async def analyze_plant_image(image_data: bytes, user_question: str = None, 
-                             previous_state: str = None, retry_count: int = 0) -> dict:
-    """Анализ изображения растения с состоянием"""
+                             previous_state: str = None, retry_count: int = 0, plant_context: str = None) -> dict:
+    """Анализ изображения растения - ДВУХЭТАПНЫЙ ПРОЦЕСС:
+    Шаг 1: Vision (gpt-4o) - что видно, проблемы, уверенность
+    Шаг 2: Reasoning (gpt-5.1) - объясняет почему, план действий, адаптация"""
     
-    logger.info("🔍 Анализ через OpenAI GPT-4 Vision...")
-    openai_result = await analyze_with_openai_advanced(image_data, user_question, previous_state)
+    logger.info("🔍 Начало двухэтапного анализа: Vision → Reasoning")
     
-    if openai_result["success"] and openai_result.get("confidence", 0) >= 50:
-        logger.info(f"✅ Успешно: {openai_result.get('confidence')}%")
-        return openai_result
+    # ШАГ 1: Vision анализ через GPT-4o
+    logger.info("📸 Шаг 1: Vision анализ (GPT-4o)...")
+    vision_result = await analyze_vision_step(image_data, user_question, previous_state)
     
-    if retry_count == 0:
-        logger.info("🔄 Повторная попытка...")
-        return await analyze_plant_image(image_data, user_question, previous_state, retry_count + 1)
+    if not vision_result["success"]:
+        logger.error(f"❌ Vision анализ не удался: {vision_result.get('error')}")
+        # Fallback на старый метод
+        if retry_count == 0:
+            logger.info("🔄 Fallback на старый метод анализа...")
+            openai_result = await analyze_with_openai_advanced(image_data, user_question, previous_state)
+            if openai_result["success"]:
+                return openai_result
+        return {"success": False, "error": vision_result.get("error", "Vision анализ не удался")}
     
-    if openai_result["success"]:
-        logger.warning(f"⚠️ Низкая уверенность: {openai_result.get('confidence')}%")
-        openai_result["needs_retry"] = True
-        return openai_result
+    # ШАГ 2: Reasoning анализ через GPT-5.1
+    logger.info("🧠 Шаг 2: Reasoning анализ (GPT-5.1)...")
+    reasoning_result = await analyze_reasoning_step(vision_result, plant_context, user_question)
     
-    logger.warning("⚠️ Fallback")
+    if not reasoning_result["success"]:
+        logger.error(f"❌ Reasoning анализ не удался: {reasoning_result.get('error')}")
+        # Если reasoning не удался, возвращаем хотя бы vision результат
+        return {
+            "success": True,
+            "analysis": f"🌱 <b>Растение:</b> {vision_result.get('plant_name', 'Неизвестное растение')}\n\n<b>Визуальный анализ:</b>\n{vision_result.get('vision_analysis', '')}\n\n<b>Возможные проблемы:</b>\n{vision_result.get('possible_problems', '')}",
+            "raw_analysis": vision_result.get('raw_observations', ''),
+            "plant_name": vision_result.get('plant_name', 'Неизвестное растение'),
+            "confidence": vision_result.get('confidence', 50),
+            "source": "vision_only",
+            "state_info": extract_plant_state_from_analysis(vision_result.get('raw_observations', '')),
+            "needs_retry": True
+        }
+    
+    # Успешный двухэтапный анализ
+    logger.info(f"✅ Двухэтапный анализ завершен успешно (уверенность: {vision_result.get('confidence', 50)}%)")
+    
+    # Извлекаем состояние из vision анализа
+    state_info = extract_plant_state_from_analysis(vision_result.get('raw_observations', ''))
+    
+    return {
+        "success": True,
+        "analysis": reasoning_result.get("full_analysis", reasoning_result.get("reasoning", "")),
+        "raw_analysis": f"VISION:\n{vision_result.get('raw_observations', '')}\n\nREASONING:\n{reasoning_result.get('reasoning', '')}",
+        "plant_name": vision_result.get('plant_name', 'Неизвестное растение'),
+        "confidence": vision_result.get('confidence', 50),
+        "source": "two_stage_analysis",
+        "state_info": state_info,
+        "vision_result": vision_result,
+        "reasoning_result": reasoning_result,
+        "needs_retry": vision_result.get('confidence', 50) < 50
+    }
     
     # Fallback текст с учетом сезона
     season_data = get_current_season()
@@ -636,401 +955,3 @@ def extract_watering_info(analysis_text: str) -> dict:
     return watering_info
 
 
-async def analyze_with_openai_advanced(image_data: bytes, user_question: str = None, previous_state: str = None) -> dict:
-    """Продвинутый анализ с определением состояния через OpenAI - GPT-4o (vision)"""
-    if not openai_client:
-        return {"success": False, "error": "OpenAI API недоступен"}
-    
-    try:
-        # Получаем информацию о текущем сезоне
-        season_data = get_current_season()
-        
-        # Формируем рекомендации по подкормке на основе сезона
-        feeding_recommendations = {
-            'winter': 'Прекратить подкормки или минимизировать до 1 раза в месяц половинной дозой',
-            'spring': 'Начать подкормки с половинной дозы, постепенно увеличивая до полной каждые 2 недели',
-            'summer': 'Регулярные подкормки каждые 1-2 недели полной дозой',
-            'autumn': 'Постепенно сокращать подкормки, с октября прекратить для большинства видов'
-        }
-        
-        # Вычисляем числовую корректировку полива
-        water_adjustment_days = 0
-        if season_data['season'] == 'winter':
-            water_adjustment_days = +5  # Зимой поливать реже
-        elif season_data['season'] == 'spring':
-            water_adjustment_days = 0  # Весной базовый интервал
-        elif season_data['season'] == 'summer':
-            water_adjustment_days = -2  # Летом поливать чаще
-        elif season_data['season'] == 'autumn':
-            water_adjustment_days = +2  # Осенью начинать сокращать
-        
-        optimized_image = await optimize_image_for_analysis(image_data, high_quality=True)
-        base64_image = base64.b64encode(optimized_image).decode('utf-8')
-        
-        # Форматируем промпт с правильными ключами
-        prompt = PLANT_IDENTIFICATION_PROMPT.format(
-            season_name=season_data['season_ru'],
-            season_description=season_data['growth_phase'],
-            season_water_note=season_data['watering_adjustment'],
-            season_light_note=season_data['light_hours'],
-            season_temperature_note=season_data['temperature_note'],
-            season_feeding_note=feeding_recommendations.get(season_data['season'], 'Стандартный режим'),
-            season_water_adjustment=f"{water_adjustment_days:+d} дня к базовому интервалу"
-        )
-        
-        if previous_state:
-            prompt += f"\n\nПредыдущее состояние растения: {previous_state}. Определите что изменилось с учетом сезонных факторов."
-        
-        if user_question:
-            prompt += f"\n\nДополнительный вопрос пользователя: {user_question}"
-        
-        # ДЛЯ VISION ИСПОЛЬЗУЕМ GPT-4o
-        response = await openai_client.chat.completions.create(
-            model="gpt-4o",  # ← GPT-4o для работы с изображениями
-            messages=[
-                {
-                    "role": "system",
-                    "content": "Вы - профессиональный ботаник-диагност с 30-летним опытом. Проводите точную идентификацию и профессиональную оценку состояния растений. Все выводы обосновывайте наблюдаемыми признаками. ОБЯЗАТЕЛЬНО учитывайте сезонность при рекомендациях по поливу."
-                },
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/jpeg;base64,{base64_image}",
-                                "detail": "high"
-                            }
-                        }
-                    ]
-                }
-            ],
-            max_tokens=1500,
-            temperature=0.2
-        )
-        
-        raw_analysis = response.choices[0].message.content
-        
-        if len(raw_analysis) < 100:
-            raise Exception("Некачественный ответ")
-        
-        # Извлекаем уверенность
-        confidence = 0
-        for line in raw_analysis.split('\n'):
-            if line.startswith("УВЕРЕННОСТЬ:"):
-                try:
-                    conf_str = line.replace("УВЕРЕННОСТЬ:", "").strip().replace("%", "")
-                    confidence = float(conf_str)
-                except:
-                    confidence = 70
-                break
-        
-        # Извлекаем название растения
-        plant_name = "Неизвестное растение"
-        for line in raw_analysis.split('\n'):
-            if line.startswith("РАСТЕНИЕ:"):
-                plant_name = line.replace("РАСТЕНИЕ:", "").strip()
-                break
-        
-        # Извлекаем состояние
-        state_info = extract_plant_state_from_analysis(raw_analysis)
-        
-        # Применяем сезонную корректировку
-        state_info['season_adjustment'] = water_adjustment_days
-        
-        formatted_analysis = format_plant_analysis(raw_analysis, confidence, state_info)
-        
-        logger.info(f"✅ Анализ завершен (GPT-4o vision). Сезон: {season_data['season_ru']}, Состояние: {state_info['current_state']}, Уверенность: {confidence}%")
-        
-        return {
-            "success": True,
-            "analysis": formatted_analysis,
-            "raw_analysis": raw_analysis,
-            "plant_name": plant_name,
-            "confidence": confidence,
-            "source": "openai_advanced",
-            "state_info": state_info,
-            "season_data": season_data
-        }
-        
-    except Exception as e:
-        logger.error(f"❌ OpenAI error: {e}", exc_info=True)
-        return {"success": False, "error": str(e)}
-
-
-async def analyze_plant_image(image_data: bytes, user_question: str = None, 
-                             previous_state: str = None, retry_count: int = 0) -> dict:
-    """Анализ изображения растения с состоянием"""
-    
-    logger.info("🔍 Анализ через OpenAI GPT-4 Vision...")
-    openai_result = await analyze_with_openai_advanced(image_data, user_question, previous_state)
-    
-    if openai_result["success"] and openai_result.get("confidence", 0) >= 50:
-        logger.info(f"✅ Успешно: {openai_result.get('confidence')}%")
-        return openai_result
-    
-    if retry_count == 0:
-        logger.info("🔄 Повторная попытка...")
-        return await analyze_plant_image(image_data, user_question, previous_state, retry_count + 1)
-    
-    if openai_result["success"]:
-        logger.warning(f"⚠️ Низкая уверенность: {openai_result.get('confidence')}%")
-        openai_result["needs_retry"] = True
-        return openai_result
-    
-    logger.warning("⚠️ Fallback")
-    
-    # Fallback текст с учетом сезона
-    season_data = get_current_season()
-    
-    # Вычисляем корректировку для fallback
-    water_adjustment_days = 0
-    if season_data['season'] == 'winter':
-        water_adjustment_days = +5
-    elif season_data['season'] == 'summer':
-        water_adjustment_days = -2
-    elif season_data['season'] == 'autumn':
-        water_adjustment_days = +2
-    
-    fallback_text = f"""
-РАСТЕНИЕ: Комнатное растение (требуется идентификация)
-УВЕРЕННОСТЬ: 20%
-ТЕКУЩЕЕ_СОСТОЯНИЕ: healthy
-ПРИЧИНА_СОСТОЯНИЯ: Недостаточно данных
-ЭТАП_РОСТА: young
-СОСТОЯНИЕ: Требуется визуальный осмотр
-ПОЛИВ_АНАЛИЗ: Субстрат не виден на фото
-ПОЛИВ_РЕКОМЕНДАЦИИ: Проверяйте влажность почвы. Сейчас {season_data['season_ru']} - {season_data['growth_phase'].lower()}
-ПОЛИВ_ИНТЕРВАЛ: {5 + water_adjustment_days}
-СВЕТ: Яркий рассеянный свет. {season_data['light_hours']}
-ТЕМПЕРАТУРА: {season_data['temperature_note']}
-ВЛАЖНОСТЬ: 40-60%
-ПОДКОРМКА: {season_data['watering_adjustment']}
-СОВЕТ: Сделайте фото при хорошем освещении для точной идентификации
-    """.strip()
-    
-    state_info = extract_plant_state_from_analysis(fallback_text)
-    formatted_analysis = format_plant_analysis(fallback_text, 20, state_info)
-    
-    return {
-        "success": True,
-        "analysis": formatted_analysis,
-        "raw_analysis": fallback_text,
-        "plant_name": "Неопознанное растение",
-        "confidence": 20,
-        "source": "fallback",
-        "needs_retry": True,
-        "state_info": state_info,
-        "season_data": season_data
-    }
-
-
-async def answer_plant_question(question: str, plant_context: str = None) -> dict:
-    """Ответить на вопрос о растении с контекстом
-    
-    Returns:
-        dict: {"answer": str, "model": str} или {"error": str} в случае ошибки
-    """
-    if not openai_client:
-        return {"error": "❌ OpenAI API недоступен"}
-    
-    try:
-        # Получаем информацию о сезоне
-        season_info = get_current_season()
-        
-        seasonal_context = f"""
-ТЕКУЩИЙ СЕЗОН: {season_info['season_ru']} ({season_info['month_name_ru']})
-ФАЗА РОСТА: {season_info['growth_phase']}
-СВЕТОВОЙ ДЕНЬ: {season_info['light_hours']}
-КОРРЕКТИРОВКА ПОЛИВА: {season_info['watering_adjustment']}
-
-СЕЗОННЫЕ ОСОБЕННОСТИ:
-{season_info['recommendations']}
-"""
-        
-        system_prompt = """Вы - профессиональный ботаник-консультант с многолетним опытом диагностики и ухода за растениями.
-
-СТИЛЬ ОБЩЕНИЯ:
-- Авторитетный, экспертный, но доступный
-- Конкретные рекомендации на основе фактов
-- Обращение на "вы" (профессиональное)
-- Структурированные ответы: диагноз → причина → решение
-- Используйте профессиональную терминологию, но объясняйте её
-- Без излишних эмоций - факты и практические действия
-
-ВАЖНО: НЕ ИСПОЛЬЗУЙТЕ markdown форматирование (**, *, _). Пишите обычным текстом.
-
-КРИТИЧЕСКИ ВАЖНО: Всегда учитывайте текущий сезон и время года при рекомендациях по поливу и уходу!
-Зимой полив значительно сокращается, летом увеличивается. Игнорирование сезона может погубить растение.
-
-У вас есть полная история растения: все анализы, проблемы, паттерны ухода пользователя.
-Основывайте рекомендации на этих данных.
-
-ПРИМЕРЫ ПРАВИЛЬНОГО СТИЛЯ:
-❌ Неправильно: "Твой рипсалис чувствует себя отлично! Продолжай в том же духе!"
-✅ Правильно: "Рипсалис находится в хорошем состоянии. Текущий режим полива оптимален - продолжайте поливать раз в 7 дней."
-
-❌ Неправильно: "Просто проверяй почву перед поливом - она должна быть сухой."
-✅ Правильно: "Перед поливом проверяйте влажность почвы на глубине 2-3 см. Поливайте только когда субстрат просохнет."
-
-СТРУКТУРА ОТВЕТА (БЕЗ НУМЕРАЦИИ):
-Первый абзац: Оценка текущего состояния и диагноз ситуации
-
-Второй абзац: Объяснение причины проблемы или текущей ситуации  
-
-Третий абзац: Конкретные действия с точными параметрами (температура, частота, количество)
-
-Четвертый абзац (при необходимости): Контроль результата и когда ожидать изменений
-
-Будьте кратким (2-4 абзаца), но исчерпывающим. Каждое утверждение должно быть обоснованным."""
-
-        user_prompt = f"""ИСТОРИЯ РАСТЕНИЯ:
-{plant_context if plant_context else "Контекст отсутствует"}
-
-{seasonal_context}
-
-ВОПРОС ПОЛЬЗОВАТЕЛЯ:
-{question}
-
-Дайте профессиональный ответ (2-4 абзаца) БЕЗ нумерации и markdown:
-
-Абзац 1: Оценка - диагноз текущей ситуации
-Абзац 2: Причина - что вызвало проблему или текущее состояние (УЧИТЫВАЙТЕ СЕЗОН!)
-Абзац 3: Решение - конкретные действия с параметрами (АДАПТИРУЙТЕ К СЕЗОНУ!)
-Абзац 4: Контроль - когда ожидать результат (если применимо)
-
-Используйте данные из истории растения для персонализации рекомендаций.
-НЕ используйте markdown форматирование (**, *, _) и нумерованные списки.
-
-ОБЯЗАТЕЛЬНО учитывайте текущий сезон в рекомендациях по поливу и уходу!"""
-        
-        # ДЛЯ ТЕКСТОВЫХ ВОПРОСОВ ИСПОЛЬЗУЕМ GPT-5.1
-        response = await openai_client.chat.completions.create(
-            model="gpt-5.1",  # ← GPT-5.1 для текстовых запросов
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            max_tokens=500,
-            temperature=0.3
-        )
-        
-        answer = response.choices[0].message.content
-        
-        if answer and len(answer) > 10:
-            logger.info(f"✅ OpenAI ответил с контекстом (модель: gpt-5.1, сезон: {season_info['season_ru']})")
-            return {"answer": answer, "model": "gpt-5.1"}
-        else:
-            logger.warning(f"⚠️ Модель gpt-5.1 вернула пустой ответ")
-            return {"error": "❌ Не могу дать ответ. Попробуйте переформулировать вопрос."}
-        
-    except Exception as e:
-        logger.error(f"❌ Ошибка ответа на вопрос: {e}", exc_info=True)
-        return {"error": "❌ Не могу дать ответ. Попробуйте переформулировать вопрос."}
-
-
-async def generate_growing_plan(plant_name: str) -> tuple:
-    """Генерация плана выращивания через OpenAI - GPT-5.1 для текста"""
-    if not openai_client:
-        return None, None
-    
-    try:
-        # Получаем информацию о сезоне
-        season_info = get_current_season()
-        
-        prompt = f"""
-Составьте профессиональный агротехнический план выращивания для: {plant_name}
-
-ТЕКУЩИЙ СЕЗОН: {season_info['season_ru']} ({season_info['month_name_ru']})
-УЧИТЫВАЙТЕ: {season_info['recommendations']}
-
-Требования к плану:
-- Научно обоснованные рекомендации с учетом текущего сезона
-- Конкретные сроки и параметры
-- Учет критических факторов успеха
-- Превентивные меры против типичных проблем
-- Адаптация под {season_info['season_ru'].lower()}
-
-Формат ответа:
-
-🌱 ЭТАП 1: Название (продолжительность X дней)
-• Конкретная агротехническая задача с параметрами
-• Следующая задача с обоснованием
-• Критические факторы этапа
-
-🌿 ЭТАП 2: Название (продолжительность X дней)
-• Задача с точными параметрами
-• Контрольные признаки успеха
-
-🌸 ЭТАП 3: Название (продолжительность X дней)
-• Задачи с учетом развития растения
-• Корректировки ухода
-
-🌳 ЭТАП 4: Название (продолжительность X дней)
-• Финальные агротехнические мероприятия
-• Критерии готовности растения
-
-В конце добавьте:
-КАЛЕНДАРЬ_ЗАДАЧ: [структурированный JSON с задачами по дням]
-"""
-        
-        # ДЛЯ ГЕНЕРАЦИИ ПЛАНОВ ИСПОЛЬЗУЕМ GPT-5.1
-        response = await openai_client.chat.completions.create(
-            model="gpt-5.1",  # ← GPT-5.1 для текстовых запросов
-            messages=[
-                {
-                    "role": "system", 
-                    "content": f"Вы - агроном-консультант с опытом выращивания широкого спектра растений. Составляйте практичные, научно обоснованные планы. Учитывайте, что сейчас {season_info['season_ru']} - {season_info['growth_phase'].lower()}."
-                },
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=1200,
-            temperature=0.2
-        )
-        
-        plan_text = response.choices[0].message.content
-        
-        # Создаем календарь задач (упрощенная версия)
-        task_calendar = {
-            "stage_1": {
-                "name": "Подготовка и посадка",
-                "duration_days": 7,
-                "tasks": [
-                    {"day": 1, "title": "Посадка", "description": "Посадите семена/черенок", "icon": "🌱"},
-                    {"day": 3, "title": "Первый полив", "description": "Умеренно полейте", "icon": "💧"},
-                    {"day": 7, "title": "Проверка", "description": "Проверьте влажность", "icon": "🔍"},
-                ]
-            },
-            "stage_2": {
-                "name": "Прорастание",
-                "duration_days": 14,
-                "tasks": [
-                    {"day": 10, "title": "Первые всходы", "description": "Проверьте появление ростков", "icon": "🌱"},
-                    {"day": 14, "title": "Регулярный полив", "description": "Поддерживайте влажность", "icon": "💧"},
-                ]
-            },
-            "stage_3": {
-                "name": "Активный рост",
-                "duration_days": 30,
-                "tasks": [
-                    {"day": 21, "title": "Первая подкормка", "description": "Внесите удобрение", "icon": "🍽️"},
-                    {"day": 35, "title": "Проверка роста", "description": "Оцените развитие растения", "icon": "📊"},
-                ]
-            },
-            "stage_4": {
-                "name": "Взрослое растение",
-                "duration_days": 30,
-                "tasks": [
-                    {"day": 50, "title": "Пересадка", "description": "Пересадите в больший горшок", "icon": "🪴"},
-                    {"day": 60, "title": "Формирование", "description": "При необходимости обрежьте", "icon": "✂️"},
-                ]
-            }
-        }
-        
-        logger.info(f"✅ План выращивания создан через GPT-5.1")
-        return plan_text, task_calendar
-        
-    except Exception as e:
-        logger.error(f"Ошибка генерации плана: {e}")
-        return None, None
