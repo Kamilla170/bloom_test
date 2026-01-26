@@ -304,7 +304,7 @@ async def analyze_plant_image(image_data: bytes, user_question: str = None,
 
 
 async def answer_plant_question(question: str, plant_context: str = None) -> str:
-    """Ответить на вопрос о растении с контекстом - GPT-5.1 для текста"""
+    """Ответить на вопрос о растении с контекстом - gpt-5.1 для текста"""
     if not openai_client:
         return "❌ OpenAI API недоступен"
     
