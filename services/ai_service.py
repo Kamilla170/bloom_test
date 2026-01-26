@@ -304,23 +304,13 @@ async def analyze_plant_image(image_data: bytes, user_question: str = None,
 
 
 async def answer_plant_question(question: str, plant_context: str = None) -> str:
-    """Ответить на вопрос о растении с контекстом - gpt-5.1 для текста"""
+    """Ответить на вопрос о растении с контекстом - GPT-5.1 для текста"""
     if not openai_client:
         return "❌ OpenAI API недоступен"
     
     try:
         # Получаем информацию о сезоне
         season_info = get_current_season()
-        
-        seasonal_context = f"""
-ТЕКУЩИЙ СЕЗОН: {season_info['season_ru']} ({season_info['month_name_ru']})
-ФАЗА РОСТА: {season_info['growth_phase']}
-СВЕТОВОЙ ДЕНЬ: {season_info['light_hours']}
-КОРРЕКТИРОВКА ПОЛИВА: {season_info['watering_adjustment']}
-
-СЕЗОННЫЕ ОСОБЕННОСТИ:
-{season_info['recommendations']}
-"""
         
         system_prompt = """Вы - профессиональный ботаник-консультант с многолетним опытом диагностики и ухода за растениями.
 
