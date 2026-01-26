@@ -86,16 +86,16 @@ async def handle_question(message: types.Message, state: FSMContext):
         await processing_msg.delete()
         
         # Проверяем формат ответа (старый формат - строка, новый - dict)
-        if isinstance(result, dict):
-            if "error" in result:
-                answer_text = result["error"]
+        if isinstance(answer, dict):
+            if "error" in answer:
+                answer_text = answer["error"]
                 model_name = None
             else:
-                answer_text = result.get("answer", "")
-                model_name = result.get("model", "unknown")
+                answer_text = answer.get("answer", "")
+                model_name = answer.get("model", "unknown")
         else:
             # Обратная совместимость со старым форматом (строка)
-            answer_text = result
+            answer_text = answer
             model_name = None
         
         logger.info(f"📝 Получен ответ от AI: модель={model_name}, длина={len(answer_text) if answer_text else 0}")

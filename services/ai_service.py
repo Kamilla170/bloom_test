@@ -6,14 +6,6 @@ from config import OPENAI_API_KEY, PLANT_IDENTIFICATION_PROMPT
 from utils.image_utils import optimize_image_for_analysis
 from utils.formatters import format_plant_analysis
 from utils.season_utils import get_current_season, get_seasonal_care_tips
-import logging
-import base64
-from openai import AsyncOpenAI
-
-from config import OPENAI_API_KEY, PLANT_IDENTIFICATION_PROMPT
-from utils.image_utils import optimize_image_for_analysis
-from utils.formatters import format_plant_analysis
-from utils.season_utils import get_current_season, get_seasonal_care_tips
 
 logger = logging.getLogger(__name__)
 
@@ -834,14 +826,28 @@ async def analyze_plant_image(image_data: bytes, user_question: str = None,
     }
 
 
-async def answer_plant_question(question: str, plant_context: str = None) -> str:
-    """Ответить на вопрос о растении с контекстом - GPT-5.1 для текста"""
+async def answer_plant_question(question: str, plant_context: str = None) -> dict:
+    """Ответить на вопрос о растении с контекстом
+    
+    Returns:
+        dict: {"answer": str, "model": str} или {"error": str} в случае ошибки
+    """
     if not openai_client:
-        return "❌ OpenAI API недоступен"
+        return {"error": "❌ OpenAI API недоступен"}
     
     try:
         # Получаем информацию о сезоне
         season_info = get_current_season()
+        
+        seasonal_context = f"""
+ТЕКУЩИЙ СЕЗОН: {season_info['season_ru']} ({season_info['month_name_ru']})
+ФАЗА РОСТА: {season_info['growth_phase']}
+СВЕТОВОЙ ДЕНЬ: {season_info['light_hours']}
+КОРРЕКТИРОВКА ПОЛИВА: {season_info['watering_adjustment']}
+
+СЕЗОННЫЕ ОСОБЕННОСТИ:
+{season_info['recommendations']}
+"""
         
         system_prompt = """Вы - профессиональный ботаник-консультант с многолетним опытом диагностики и ухода за растениями.
 
@@ -912,12 +918,16 @@ async def answer_plant_question(question: str, plant_context: str = None) -> str
         
         answer = response.choices[0].message.content
         
-        logger.info(f"✅ GPT-5.1 ответил с контекстом (сезон: {season_info['season_ru']})")
-        return answer
+        if answer and len(answer) > 10:
+            logger.info(f"✅ OpenAI ответил с контекстом (модель: gpt-5.1, сезон: {season_info['season_ru']})")
+            return {"answer": answer, "model": "gpt-5.1"}
+        else:
+            logger.warning(f"⚠️ Модель gpt-5.1 вернула пустой ответ")
+            return {"error": "❌ Не могу дать ответ. Попробуйте переформулировать вопрос."}
         
     except Exception as e:
-        logger.error(f"❌ Ошибка ответа на вопрос: {e}")
-        return "❌ Не могу дать ответ. Попробуйте переформулировать вопрос."
+        logger.error(f"❌ Ошибка ответа на вопрос: {e}", exc_info=True)
+        return {"error": "❌ Не могу дать ответ. Попробуйте переформулировать вопрос."}
 
 
 async def generate_growing_plan(plant_name: str) -> tuple:
