@@ -12,6 +12,9 @@ logger = logging.getLogger(__name__)
 # Инициализация OpenAI клиента
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
+# Модель GPT-5.1 для reasoning задач
+GPT_5_1_MODEL = "gpt-5.1-2025-11-13"  # Правильный model ID для GPT-5.1
+
 
 def extract_plant_state_from_analysis(raw_analysis: str) -> dict:
     """Извлечь информацию о состоянии из анализа AI"""
@@ -324,9 +327,9 @@ async def analyze_reasoning_step(vision_result: dict, plant_context: str = None,
 ОБЯЗАТЕЛЬНО учитывайте текущий сезон в рекомендациях по поливу и уходу!"""
         
         # Используем GPT-5.1 для reasoning (Chat Completions API)
-        logger.info("🧠 Reasoning анализ: использую модель GPT-5.1")
+        logger.info(f"🧠 Reasoning анализ: использую модель {GPT_5_1_MODEL}")
         response = await openai_client.chat.completions.create(
-            model="gpt-5.1",
+            model=GPT_5_1_MODEL,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
@@ -340,7 +343,7 @@ async def analyze_reasoning_step(vision_result: dict, plant_context: str = None,
         if not reasoning_text or len(reasoning_text) < 50:
             raise Exception("Некачественный ответ от reasoning модели")
         
-        logger.info(f"✅ Reasoning анализ завершен (модель: GPT-5.1, сезон: {season_info['season_ru']})")
+        logger.info(f"✅ Reasoning анализ завершен (модель: {GPT_5_1_MODEL}, сезон: {season_info['season_ru']})")
         
         # Формируем полный анализ для пользователя
         full_analysis = f"""🌱 <b>Растение:</b> {vision_result.get('plant_name', 'Неизвестное растение')}
@@ -364,7 +367,7 @@ async def analyze_reasoning_step(vision_result: dict, plant_context: str = None,
         logger.error(f"❌ Reasoning анализ ошибка: {e}", exc_info=True)
         # Fallback на более простую модель если gpt-5.1 недоступна
         try:
-            logger.warning("🔄 GPT-5.1 недоступна, использую fallback модель GPT-4o для reasoning")
+            logger.warning(f"🔄 {GPT_5_1_MODEL} недоступна, использую fallback модель GPT-4o для reasoning")
             response = await openai_client.chat.completions.create(
                 model="gpt-4o",
                 messages=[
@@ -543,7 +546,7 @@ async def analyze_plant_image(image_data: bytes, user_question: str = None,
         return {"success": False, "error": vision_result.get("error", "Vision анализ не удался")}
     
     # ШАГ 2: Reasoning анализ через GPT-5.1
-    logger.info("🧠 Шаг 2: Reasoning анализ (GPT-5.1)...")
+    logger.info(f"🧠 Шаг 2: Reasoning анализ ({GPT_5_1_MODEL})...")
     reasoning_result = await analyze_reasoning_step(vision_result, plant_context, user_question)
     
     if not reasoning_result["success"]:
@@ -704,7 +707,7 @@ async def answer_plant_question(question: str, plant_context: str = None) -> dic
 ОБЯЗАТЕЛЬНО учитывайте текущий сезон в рекомендациях по поливу и уходу!"""
         
         # Пробуем сначала gpt-5.1, если не получается - fallback на gpt-4o
-        models_to_try = ["gpt-5.1", "gpt-4o"]
+        models_to_try = [GPT_5_1_MODEL, "gpt-4o"]
         last_error = None
         
         for model_name in models_to_try:
@@ -721,7 +724,7 @@ async def answer_plant_question(question: str, plant_context: str = None) -> dic
                     "temperature": 0.3
                 }
                 
-                if model_name == "gpt-5.1":
+                if model_name == GPT_5_1_MODEL:
                     api_params["max_completion_tokens"] = 500
                 else:
                     api_params["max_tokens"] = 500
@@ -803,8 +806,9 @@ async def generate_growing_plan(plant_name: str) -> tuple:
 КАЛЕНДАРЬ_ЗАДАЧ: [структурированный JSON с задачами по дням]
 """
         
+        logger.info(f"📋 Генерация плана выращивания: использую модель {GPT_5_1_MODEL}")
         response = await openai_client.chat.completions.create(
-            model="gpt-5.1",
+            model=GPT_5_1_MODEL,
             messages=[
                 {
                     "role": "system", 
@@ -817,6 +821,7 @@ async def generate_growing_plan(plant_name: str) -> tuple:
         )
         
         plan_text = response.choices[0].message.content
+        logger.info(f"✅ План выращивания сгенерирован (модель: {GPT_5_1_MODEL})")
         
         # Создаем календарь задач (упрощенная версия)
         task_calendar = {
@@ -859,6 +864,64 @@ async def generate_growing_plan(plant_name: str) -> tuple:
         
     except Exception as e:
         logger.error(f"Ошибка генерации плана: {e}")
-        return None, None
-
-
+        # Fallback на GPT-4o
+        try:
+            logger.warning(f"🔄 {GPT_5_1_MODEL} недоступна для генерации плана, использую GPT-4o")
+            response = await openai_client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {
+                        "role": "system", 
+                        "content": f"Вы - агроном-консультант с опытом выращивания широкого спектра растений. Составляйте практичные, научно обоснованные планы. Учитывайте, что сейчас {season_info['season_ru']} - {season_info['growth_phase'].lower()}."
+                    },
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=1200,
+                temperature=0.2
+            )
+            
+            plan_text = response.choices[0].message.content
+            logger.info("✅ План выращивания сгенерирован (модель: GPT-4o fallback)")
+            
+            # Тот же календарь задач
+            task_calendar = {
+                "stage_1": {
+                    "name": "Подготовка и посадка",
+                    "duration_days": 7,
+                    "tasks": [
+                        {"day": 1, "title": "Посадка", "description": "Посадите семена/черенок", "icon": "🌱"},
+                        {"day": 3, "title": "Первый полив", "description": "Умеренно полейте", "icon": "💧"},
+                        {"day": 7, "title": "Проверка", "description": "Проверьте влажность", "icon": "🔍"},
+                    ]
+                },
+                "stage_2": {
+                    "name": "Прорастание",
+                    "duration_days": 14,
+                    "tasks": [
+                        {"day": 10, "title": "Первые всходы", "description": "Проверьте появление ростков", "icon": "🌱"},
+                        {"day": 14, "title": "Регулярный полив", "description": "Поддерживайте влажность", "icon": "💧"},
+                    ]
+                },
+                "stage_3": {
+                    "name": "Активный рост",
+                    "duration_days": 30,
+                    "tasks": [
+                        {"day": 21, "title": "Первая подкормка", "description": "Внесите удобрение", "icon": "🍽️"},
+                        {"day": 35, "title": "Проверка роста", "description": "Оцените развитие растения", "icon": "📊"},
+                    ]
+                },
+                "stage_4": {
+                    "name": "Взрослое растение",
+                    "duration_days": 30,
+                    "tasks": [
+                        {"day": 50, "title": "Пересадка", "description": "Пересадите в больший горшок", "icon": "🪴"},
+                        {"day": 60, "title": "Формирование", "description": "При необходимости обрежьте", "icon": "✂️"},
+                    ]
+                }
+            }
+            
+            return plan_text, task_calendar
+            
+        except Exception as fallback_error:
+            logger.error(f"❌ Fallback генерации плана ошибка: {fallback_error}")
+            return None, None
