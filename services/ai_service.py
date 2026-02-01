@@ -335,8 +335,8 @@ async def analyze_reasoning_step(vision_result: dict, plant_context: str = None,
                 {"role": "user", "content": user_prompt}
             ],
             max_completion_tokens=800,
-            temperature=0.3,
             extra_body={"reasoning_effort": "low"}
+            # GPT-5.1 не поддерживает temperature
         )
         
         reasoning_text = response.choices[0].message.content
@@ -721,15 +721,16 @@ async def answer_plant_question(question: str, plant_context: str = None) -> dic
                     "messages": [
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt}
-                    ],
-                    "temperature": 0.3
+                    ]
                 }
                 
                 if model_name == GPT_5_1_MODEL:
                     api_params["max_completion_tokens"] = 500
                     api_params["extra_body"] = {"reasoning_effort": "low"}
+                    # GPT-5.1 не поддерживает temperature, убираем
                 else:
                     api_params["max_tokens"] = 500
+                    api_params["temperature"] = 0.3
                 
                 response = await openai_client.chat.completions.create(**api_params)
                 
@@ -819,8 +820,8 @@ async def generate_growing_plan(plant_name: str) -> tuple:
                 {"role": "user", "content": prompt}
             ],
             max_completion_tokens=1200,
-            temperature=0.2,
             extra_body={"reasoning_effort": "low"}
+            # GPT-5.1 не поддерживает temperature
         )
         
         plan_text = response.choices[0].message.content
