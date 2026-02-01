@@ -734,6 +734,12 @@ async def answer_plant_question(question: str, plant_context: str = None) -> dic
                 
                 response = await openai_client.chat.completions.create(**api_params)
                 
+                # Отладка для GPT-5.1
+                if model_name == GPT_5_1_MODEL:
+                    logger.info(f"🔍 GPT-5.1 raw response: {response.choices[0]}")
+                    logger.info(f"🔍 GPT-5.1 message: {response.choices[0].message}")
+                    logger.info(f"🔍 GPT-5.1 content: {response.choices[0].message.content}")
+                
                 answer = response.choices[0].message.content
                 
                 if answer and len(answer) > 10:
