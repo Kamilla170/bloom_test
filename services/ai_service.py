@@ -335,8 +335,8 @@ async def analyze_reasoning_step(vision_result: dict, plant_context: str = None,
                 {"role": "user", "content": user_prompt}
             ],
             max_completion_tokens=800,
-            reasoning_effort="low",  # Нужен для GPT-5.1 чтобы получить ответ
-            temperature=0.3
+            temperature=0.3,
+            extra_body={"reasoning_effort": "low"}
         )
         
         reasoning_text = response.choices[0].message.content
@@ -727,7 +727,7 @@ async def answer_plant_question(question: str, plant_context: str = None) -> dic
                 
                 if model_name == GPT_5_1_MODEL:
                     api_params["max_completion_tokens"] = 500
-                    api_params["reasoning_effort"] = "low"  # Нужен для GPT-5.1 чтобы получить ответ
+                    api_params["extra_body"] = {"reasoning_effort": "low"}
                 else:
                     api_params["max_tokens"] = 500
                 
@@ -819,8 +819,8 @@ async def generate_growing_plan(plant_name: str) -> tuple:
                 {"role": "user", "content": prompt}
             ],
             max_completion_tokens=1200,
-            reasoning_effort="low",  # Нужен для GPT-5.1 чтобы получить ответ
-            temperature=0.2
+            temperature=0.2,
+            extra_body={"reasoning_effort": "low"}
         )
         
         plan_text = response.choices[0].message.content
