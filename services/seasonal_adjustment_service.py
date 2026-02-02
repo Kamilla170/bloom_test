@@ -5,7 +5,6 @@
 
 import logging
 from openai import AsyncOpenAI
-from typing import List, Dict
 
 from database import get_db
 from config import OPENAI_API_KEY
@@ -17,37 +16,42 @@ logger = logging.getLogger(__name__)
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 
-async def get_seasonal_watering_interval(plant_name: str, base_interval: int, season_info: dict) -> int:
+async def get_seasonal_watering_interval(plant_name: str, current_interval: int, season_info: dict) -> int:
     """
     Спросить GPT какой интервал полива нужен для растения в текущем сезоне
     
     Args:
         plant_name: название растения
-        base_interval: базовый (летний) интервал полива
+        current_interval: текущий интервал полива
         season_info: информация о текущем сезоне
         
     Returns:
         int: новый интервал полива в днях
     """
     if not openai_client:
-        logger.warning("⚠️ OpenAI недоступен, используем формулу")
-        return calculate_interval_by_formula(base_interval, season_info['season'])
+        logger.warning("⚠️ OpenAI недоступен, оставляем текущий интервал")
+        return current_interval
     
     try:
         prompt = f"""Ты - эксперт по комнатным растениям. 
 
 Растение: {plant_name}
-Базовый летний интервал полива: {base_interval} дней
-Текущий сезон: {season_info['season_ru']} ({season_info['month_name_ru']})
-Фаза роста: {season_info['growth_phase']}
+Текущий интервал полива: {current_interval} дней
+Сейчас: {season_info['month_name_ru']} ({season_info['season_ru']})
 
 Учитывая особенности этого вида растения и текущий сезон, какой должен быть интервал полива?
 
-ВАЖНО:
-- Зимой большинство растений требуют полива в 1.5-2.5 раза реже
-- Суккуленты и кактусы зимой почти не поливают (раз в 3-4 недели)
-- Тропические растения зимой тоже сокращают полив, но меньше
+ВАЖНЫЕ ПРАВИЛА:
+- Зимой (декабрь-февраль): большинство растений поливают в 1.5-2.5 раза РЕЖЕ
+- Весной (март-май): постепенно увеличиваем полив, интервал как летом или чуть реже
+- Летом (июнь-август): максимальная частота полива (самый короткий интервал)
+- Осенью (сентябрь-ноябрь): постепенно сокращаем полив
+
+ОСОБЕННОСТИ ВИДОВ:
+- Суккуленты и кактусы зимой почти не поливают (21-28 дней)
+- Тропические растения (фикусы, монстеры) зимой 10-14 дней
 - Цветущие растения требуют больше воды даже зимой
+- Папоротники и влаголюбивые - чаще других, но зимой тоже реже
 
 Ответь ТОЛЬКО ОДНИМ ЧИСЛОМ - количество дней между поливами.
 Число должно быть от 3 до 28."""
@@ -55,7 +59,7 @@ async def get_seasonal_watering_interval(plant_name: str, base_interval: int, se
         response = await openai_client.chat.completions.create(
             model="gpt-4o-mini",  # Используем дешёвую модель для простых запросов
             messages=[
-                {"role": "system", "content": "Ты эксперт по уходу за комнатными растениями. Отвечай только числом."},
+                {"role": "system", "content": "Ты эксперт по уходу за комнатными растениями. Отвечай только числом - количеством дней между поливами."},
                 {"role": "user", "content": prompt}
             ],
             max_tokens=10,
@@ -74,39 +78,22 @@ async def get_seasonal_watering_interval(plant_name: str, base_interval: int, se
             logger.info(f"✅ GPT: {plant_name} → {interval} дней ({season_info['season_ru']})")
             return interval
         else:
-            logger.warning(f"⚠️ GPT не вернул число для {plant_name}: '{answer}'")
-            return calculate_interval_by_formula(base_interval, season_info['season'])
+            logger.warning(f"⚠️ GPT не вернул число для {plant_name}: '{answer}', оставляем {current_interval}")
+            return current_interval
             
     except Exception as e:
         logger.error(f"❌ Ошибка GPT для {plant_name}: {e}")
-        return calculate_interval_by_formula(base_interval, season_info['season'])
-
-
-def calculate_interval_by_formula(base_interval: int, season: str) -> int:
-    """
-    Fallback: рассчитать интервал по формуле если GPT недоступен
-    """
-    multipliers = {
-        'winter': 2.0,
-        'spring': 1.0,
-        'summer': 0.8,
-        'autumn': 1.4
-    }
-    
-    multiplier = multipliers.get(season, 1.0)
-    adjusted = int(round(base_interval * multiplier))
-    
-    return max(3, min(28, adjusted))
+        return current_interval
 
 
 async def adjust_all_plants_for_season():
     """
-    Главная функция: пересчитать интервалы полива для всех растений
+    Главная функция: пересчитать интервалы полива для всех растений через GPT
     Запускается 1 числа каждого месяца
     """
     try:
         logger.info("=" * 60)
-        logger.info("🌍 СЕЗОННАЯ КОРРЕКТИРОВКА ИНТЕРВАЛОВ ПОЛИВА")
+        logger.info("🌍 СЕЗОННАЯ КОРРЕКТИРОВКА ИНТЕРВАЛОВ ПОЛИВА (GPT)")
         logger.info("=" * 60)
         
         season_info = get_current_season()
@@ -116,116 +103,91 @@ async def adjust_all_plants_for_season():
         
         db = await get_db()
         
-        async with db.pool.acquire() as conn:
-            # Получаем все активные растения с базовым интервалом
-            plants = await conn.fetch("""
-                SELECT 
-                    p.id,
-                    p.user_id,
-                    COALESCE(p.custom_name, p.plant_name, 'Растение #' || p.id) as display_name,
-                    p.plant_name,
-                    COALESCE(p.base_watering_interval, p.watering_interval, 7) as base_interval,
-                    p.watering_interval as current_interval
-                FROM plants p
-                WHERE p.plant_type = 'regular'
-                  AND p.reminder_enabled = TRUE
-                ORDER BY p.user_id, p.id
-            """)
-            
-            logger.info(f"📊 Найдено растений для обработки: {len(plants)}")
-            
-            if not plants:
-                logger.info("✅ Нет растений для корректировки")
-                return
-            
-            updated_count = 0
-            error_count = 0
-            
-            # Группируем по пользователям для оптимизации
-            current_user_id = None
-            
-            for plant in plants:
-                try:
-                    plant_id = plant['id']
-                    user_id = plant['user_id']
-                    plant_name = plant['plant_name'] or plant['display_name']
-                    base_interval = plant['base_interval']
-                    current_interval = plant['current_interval']
-                    
-                    # Логируем смену пользователя
-                    if user_id != current_user_id:
-                        current_user_id = user_id
-                        logger.info(f"👤 Пользователь {user_id}:")
-                    
-                    # Получаем новый интервал от GPT
-                    new_interval = await get_seasonal_watering_interval(
-                        plant_name, 
-                        base_interval, 
-                        season_info
-                    )
-                    
-                    # Обновляем только если изменился
-                    if new_interval != current_interval:
+        # Получаем все растения для корректировки
+        plants = await db.get_all_plants_for_seasonal_update()
+        
+        logger.info(f"📊 Найдено растений для обработки: {len(plants)}")
+        
+        if not plants:
+            logger.info("✅ Нет растений для корректировки")
+            return
+        
+        updated_count = 0
+        error_count = 0
+        skipped_count = 0
+        
+        # Группируем по пользователям для логирования
+        current_user_id = None
+        
+        for plant in plants:
+            try:
+                plant_id = plant['id']
+                user_id = plant['user_id']
+                plant_name = plant['plant_name'] or plant['display_name']
+                current_interval = plant['current_interval'] or 7
+                
+                # Логируем смену пользователя
+                if user_id != current_user_id:
+                    current_user_id = user_id
+                    logger.info(f"👤 Пользователь {user_id}:")
+                
+                # Пропускаем только если plant_name пустое или NULL
+                # Название сохраняется при анализе фото, если уверенность была достаточной
+                if not plant_name or not plant_name.strip():
+                    logger.info(f"   ⏭️ {plant['display_name']}: пропущено (нет названия вида)")
+                    skipped_count += 1
+                    continue
+                
+                # Получаем новый интервал от GPT
+                new_interval = await get_seasonal_watering_interval(
+                    plant_name, 
+                    current_interval, 
+                    season_info
+                )
+                
+                # Обновляем только если изменился
+                if new_interval != current_interval:
+                    async with db.pool.acquire() as conn:
                         await conn.execute("""
                             UPDATE plants 
                             SET watering_interval = $1
                             WHERE id = $2
                         """, new_interval, plant_id)
-                        
-                        # Пересоздаём напоминание с новым интервалом
-                        from services.reminder_service import create_plant_reminder
-                        await create_plant_reminder(plant_id, user_id, new_interval)
-                        
-                        logger.info(f"   🌱 {plant['display_name']}: {current_interval} → {new_interval} дней")
-                        updated_count += 1
-                    else:
-                        logger.info(f"   🌱 {plant['display_name']}: без изменений ({current_interval} дней)")
-                        
-                except Exception as e:
-                    error_count += 1
-                    logger.error(f"   ❌ Ошибка для растения {plant['id']}: {e}")
-            
-            logger.info("=" * 60)
-            logger.info(f"✅ КОРРЕКТИРОВКА ЗАВЕРШЕНА")
-            logger.info(f"📊 Обновлено: {updated_count} из {len(plants)}")
-            if error_count:
-                logger.info(f"❌ Ошибок: {error_count}")
-            logger.info("=" * 60)
+                    
+                    # Пересоздаём напоминание с новым интервалом
+                    from services.reminder_service import create_plant_reminder
+                    await create_plant_reminder(plant_id, user_id, new_interval)
+                    
+                    logger.info(f"   🌱 {plant['display_name']}: {current_interval} → {new_interval} дней")
+                    updated_count += 1
+                else:
+                    logger.info(f"   🌱 {plant['display_name']}: без изменений ({current_interval} дней)")
+                    
+            except Exception as e:
+                error_count += 1
+                logger.error(f"   ❌ Ошибка для растения {plant.get('id')}: {e}")
+        
+        logger.info("=" * 60)
+        logger.info(f"✅ КОРРЕКТИРОВКА ЗАВЕРШЕНА")
+        logger.info(f"📊 Обновлено: {updated_count}")
+        logger.info(f"⏭️ Пропущено: {skipped_count}")
+        if error_count:
+            logger.info(f"❌ Ошибок: {error_count}")
+        logger.info("=" * 60)
             
     except Exception as e:
         logger.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА сезонной корректировки: {e}", exc_info=True)
 
 
-async def set_base_interval_for_plant(plant_id: int, base_interval: int):
-    """
-    Установить базовый (летний) интервал полива для растения
-    Вызывается при добавлении нового растения
-    """
-    try:
-        db = await get_db()
-        async with db.pool.acquire() as conn:
-            await conn.execute("""
-                UPDATE plants 
-                SET base_watering_interval = $1
-                WHERE id = $2
-            """, base_interval, plant_id)
-            
-        logger.info(f"✅ Базовый интервал {base_interval} дней установлен для растения {plant_id}")
-        
-    except Exception as e:
-        logger.error(f"❌ Ошибка установки базового интервала: {e}")
-
-
 async def migrate_base_intervals():
     """
-    Миграция: установить base_watering_interval для существующих растений
-    Запускается один раз
+    Миграция: убеждаемся что колонка base_watering_interval существует
+    Теперь base_watering_interval = текущий интервал (GPT сам корректирует)
     """
     try:
-        logger.info("🔄 Миграция базовых интервалов полива...")
+        logger.info("🔄 Проверка структуры таблицы plants...")
         
         db = await get_db()
-        season_info = get_current_season()
         
         async with db.pool.acquire() as conn:
             # Добавляем колонку если её нет
@@ -234,46 +196,66 @@ async def migrate_base_intervals():
                 ADD COLUMN IF NOT EXISTS base_watering_interval INTEGER
             """)
             
-            # Получаем растения без базового интервала
-            plants = await conn.fetch("""
-                SELECT id, watering_interval, plant_name
-                FROM plants
+            # Заполняем base_watering_interval из watering_interval где NULL
+            updated = await conn.execute("""
+                UPDATE plants
+                SET base_watering_interval = watering_interval
                 WHERE base_watering_interval IS NULL
-                  AND plant_type = 'regular'
+                  AND watering_interval IS NOT NULL
             """)
             
-            if not plants:
-                logger.info("✅ Все растения уже имеют базовый интервал")
-                return
-            
-            logger.info(f"📊 Найдено растений без базового интервала: {len(plants)}")
-            
-            # Рассчитываем базовый интервал из текущего
-            # Если сейчас зима и интервал 10, то базовый = 10 / 2.0 = 5
-            reverse_multipliers = {
-                'winter': 0.5,   # Делим на 2 чтобы получить летний
-                'spring': 1.0,
-                'summer': 1.25,  # Умножаем на 1.25 чтобы получить летний
-                'autumn': 0.7
-            }
-            
-            multiplier = reverse_multipliers.get(season_info['season'], 1.0)
-            
-            for plant in plants:
-                current = plant['watering_interval'] or 7
-                base = int(round(current * multiplier))
-                base = max(3, min(14, base))  # Базовый летний интервал 3-14 дней
-                
-                await conn.execute("""
-                    UPDATE plants 
-                    SET base_watering_interval = $1
-                    WHERE id = $2
-                """, base, plant['id'])
-                
-                logger.info(f"   🌱 {plant['plant_name'] or f'Растение #{plant['id']}'}: "
-                          f"текущий {current} → базовый {base} дней")
-            
-            logger.info(f"✅ Миграция завершена: {len(plants)} растений обновлено")
+            logger.info(f"✅ Миграция base_watering_interval завершена")
             
     except Exception as e:
-        logger.error(f"❌ Ошибка миграции базовых интервалов: {e}", exc_info=True)
+        logger.error(f"❌ Ошибка миграции: {e}", exc_info=True)
+
+
+async def force_seasonal_update_for_plant(plant_id: int, user_id: int) -> dict:
+    """
+    Принудительно обновить интервал полива для одного растения
+    Можно вызвать вручную через админку или команду
+    """
+    try:
+        db = await get_db()
+        plant = await db.get_plant_by_id(plant_id, user_id)
+        
+        if not plant:
+            return {"success": False, "error": "Растение не найдено"}
+        
+        plant_name = plant.get('plant_name') or plant.get('display_name')
+        current_interval = plant.get('watering_interval', 7)
+        
+        if not plant_name or not plant_name.strip():
+            return {"success": False, "error": "Не указано название вида растения. Обновите фото для идентификации."}
+        
+        season_info = get_current_season()
+        
+        new_interval = await get_seasonal_watering_interval(
+            plant_name,
+            current_interval,
+            season_info
+        )
+        
+        if new_interval != current_interval:
+            async with db.pool.acquire() as conn:
+                await conn.execute("""
+                    UPDATE plants 
+                    SET watering_interval = $1
+                    WHERE id = $2
+                """, new_interval, plant_id)
+            
+            from services.reminder_service import create_plant_reminder
+            await create_plant_reminder(plant_id, user_id, new_interval)
+        
+        return {
+            "success": True,
+            "plant_name": plant_name,
+            "old_interval": current_interval,
+            "new_interval": new_interval,
+            "season": season_info['season_ru'],
+            "changed": new_interval != current_interval
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка обновления растения {plant_id}: {e}")
+        return {"success": False, "error": str(e)}
