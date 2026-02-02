@@ -864,6 +864,32 @@ class PlantDatabase:
                 SET watering_interval = $1 
                 WHERE id = $2
             """, interval_days, plant_id)
+    async def set_base_watering_interval(self, plant_id: int, base_interval: int):
+4        """Установить базовый (летний) интервал полива"""
+5        async with self.pool.acquire() as conn:
+6            await conn.execute("""
+7                UPDATE plants 
+8                SET base_watering_interval = $1 
+9                WHERE id = $2
+10            """, base_interval, plant_id)
+11    
+12    async def get_all_plants_for_seasonal_update(self) -> list:
+13        """Получить все растения для сезонной корректировки"""
+14        async with self.pool.acquire() as conn:
+15            rows = await conn.fetch("""
+16                SELECT 
+17                    p.id,
+18                    p.user_id,
+19                    COALESCE(p.custom_name, p.plant_name, 'Растение #' || p.id) as display_name,
+20                    p.plant_name,
+21                    COALESCE(p.base_watering_interval, p.watering_interval, 7) as base_interval,
+22                    p.watering_interval as current_interval
+23                FROM plants p
+24                WHERE p.plant_type = 'regular'
+25                  AND p.reminder_enabled = TRUE
+26                ORDER BY p.user_id, p.id
+27            """)
+28            return [dict(row) for row in rows]
     
     async def get_plant_by_id(self, plant_id: int, user_id: int = None) -> Optional[Dict]:
         """Получить растение по ID"""
