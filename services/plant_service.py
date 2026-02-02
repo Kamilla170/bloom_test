@@ -17,10 +17,13 @@ async def save_analyzed_plant(user_id: int, analysis_data: dict) -> dict:
         raw_analysis = analysis_data.get("analysis", "")
         state_info = analysis_data.get("state_info", {})
         
-        watering_info = extract_watering_info(raw_analysis)
+        # Приоритет: явный watering_interval > извлечённый из текста > default
+        ai_interval = analysis_data.get("watering_interval")
         
-        # GPT уже выдал интервал С УЧЁТОМ СЕЗОНА - используем напрямую!
-        ai_interval = watering_info["interval_days"]
+        if ai_interval is None:
+            # Fallback: пробуем извлечь из текста анализа
+            watering_info = extract_watering_info(raw_analysis)
+            ai_interval = watering_info["interval_days"]
         
         # Валидация: интервал должен быть в разумных пределах
         if ai_interval < 3:
