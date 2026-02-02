@@ -70,10 +70,10 @@ async def save_analyzed_plant(user_id: int, analysis_data: dict) -> dict:
             plant_name=analysis_data.get("plant_name", "Неизвестное растение")
         )
         
-        # Устанавливаем интервал полива от AI
+        # ✅ ИСПРАВЛЕНО: Устанавливаем СЕЗОННЫЙ интервал от AI (12 дней зимой)
         await db.update_plant_watering_interval(plant_id, ai_interval)
         
-        # Сохраняем базовый (летний) интервал для будущих сезонных корректировок
+        # Сохраняем базовый (летний) интервал для будущих сезонных корректировок (6 дней)
         await db.set_base_watering_interval(plant_id, base_interval)
         
         # Сохраняем состояние растения
@@ -105,13 +105,14 @@ async def save_analyzed_plant(user_id: int, analysis_data: dict) -> dict:
             lighting_advice=None
         )
         
-        # Создаем напоминание с интервалом от AI
+        # ✅ ИСПРАВЛЕНО: Создаем напоминание с СЕЗОННЫМ интервалом от AI (12 дней зимой)
         await create_plant_reminder(plant_id, user_id, ai_interval)
         
         plant_name = analysis_data.get("plant_name", "растение")
         state_emoji = STATE_EMOJI.get(current_state, '🌱')
         state_name = STATE_NAMES.get(current_state, 'Здоровое')
         
+        # ✅ ИСПРАВЛЕНО: Возвращаем СЕЗОННЫЙ интервал (12 дней), а не базовый (6 дней)
         return {
             "success": True,
             "plant_id": plant_id,
@@ -119,7 +120,7 @@ async def save_analyzed_plant(user_id: int, analysis_data: dict) -> dict:
             "state": current_state,
             "state_emoji": state_emoji,
             "state_name": state_name,
-            "interval": ai_interval,
+            "interval": ai_interval,  # ← ПРАВИЛЬНО: возвращаем ai_interval (12 дней зимой)
             "season": season_info['season_ru']
         }
         
