@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime
 from database import get_db
 from services.ai_service import extract_watering_info
 from services.reminder_service import create_plant_reminder
@@ -11,8 +12,14 @@ logger = logging.getLogger(__name__)
 temp_analyses = {}
 
 
-async def save_analyzed_plant(user_id: int, analysis_data: dict) -> dict:
-    """Сохранение проанализированного растения"""
+async def save_analyzed_plant(user_id: int, analysis_data: dict, last_watered: datetime = None) -> dict:
+    """Сохранение проанализированного растения
+    
+    Args:
+        user_id: ID пользователя
+        analysis_data: данные анализа
+        last_watered: дата последнего полива (опционально)
+    """
     try:
         raw_analysis = analysis_data.get("analysis", "")
         state_info = analysis_data.get("state_info", {})
@@ -24,6 +31,8 @@ async def save_analyzed_plant(user_id: int, analysis_data: dict) -> dict:
             # Fallback: пробуем извлечь из текста анализа
             watering_info = extract_watering_info(raw_analysis)
             ai_interval = watering_info["interval_days"]
+        else:
+            watering_info = {"personal_recommendations": ""}
         
         # Валидация: интервал должен быть в разумных пределах
         if ai_interval < 3:
@@ -49,6 +58,25 @@ async def save_analyzed_plant(user_id: int, analysis_data: dict) -> dict:
         # Сохраняем базовый интервал = интервал от GPT
         # При сезонной корректировке GPT пересчитает его
         await db.set_base_watering_interval(plant_id, ai_interval)
+        
+        # Устанавливаем last_watered если указано пользователем
+        next_watering_days = ai_interval  # По умолчанию
+        
+        if last_watered:
+            async with db.pool.acquire() as conn:
+                await conn.execute("""
+                    UPDATE plants 
+                    SET last_watered = $1
+                    WHERE id = $2
+                """, last_watered, plant_id)
+            
+            # Рассчитываем дни до следующего полива
+            from datetime import datetime
+            now = datetime.now()
+            days_since_watered = (now - last_watered).days
+            next_watering_days = max(1, ai_interval - days_since_watered)
+            
+            logger.info(f"💧 Последний полив: {days_since_watered} дней назад, следующий через {next_watering_days} дней")
         
         # Сохраняем состояние растения
         current_state = state_info.get('current_state', 'healthy')
@@ -79,14 +107,14 @@ async def save_analyzed_plant(user_id: int, analysis_data: dict) -> dict:
             lighting_advice=None
         )
         
-        # Создаем напоминание с интервалом от GPT
-        await create_plant_reminder(plant_id, user_id, ai_interval)
+        # Создаем напоминание с учётом last_watered
+        await create_plant_reminder(plant_id, user_id, next_watering_days)
         
         plant_name = analysis_data.get("plant_name", "растение")
         state_emoji = STATE_EMOJI.get(current_state, '🌱')
         state_name = STATE_NAMES.get(current_state, 'Здоровое')
         
-        logger.info(f"✅ Растение сохранено: {plant_name}, интервал полива: {ai_interval} дней")
+        logger.info(f"✅ Растение сохранено: {plant_name}, интервал полива: {ai_interval} дней, следующий полив через: {next_watering_days} дней")
         
         return {
             "success": True,
@@ -95,7 +123,8 @@ async def save_analyzed_plant(user_id: int, analysis_data: dict) -> dict:
             "state": current_state,
             "state_emoji": state_emoji,
             "state_name": state_name,
-            "interval": ai_interval
+            "interval": ai_interval,
+            "next_watering_days": next_watering_days
         }
         
     except Exception as e:
