@@ -20,6 +20,10 @@ from services.reminder_service import (
     check_and_send_reminders, 
     check_monthly_photo_reminders
 )
+from services.seasonal_adjustment_service import (
+    adjust_all_plants_for_season,
+    migrate_base_intervals
+)
 
 # Импорты handlers
 from handlers import (
@@ -54,6 +58,9 @@ async def on_startup():
         # Инициализация базы данных
         await init_database()
         logger.info("✅ База данных инициализирована")
+        
+        # Миграция базовых интервалов (один раз)
+        await migrate_base_intervals()
         
         # Удаление старого webhook
         logger.info("🔧 Удаление старого webhook...")
@@ -173,6 +180,18 @@ def setup_scheduler():
     )
     logger.info(f"✅ Задача 'monthly_reminder_check' добавлена: ежедневно в 10:00 МСК")
     
+    # 🌍 СЕЗОННАЯ КОРРЕКТИРОВКА - 1 числа каждого месяца в 03:00 МСК
+    scheduler.add_job(
+        adjust_all_plants_for_season,
+        'cron',
+        day=1,
+        hour=3,
+        minute=0,
+        id='seasonal_adjustment',
+        replace_existing=True
+    )
+    logger.info(f"✅ Задача 'seasonal_adjustment' добавлена: 1 числа каждого месяца в 03:00 МСК")
+    
     # КРИТИЧЕСКИ ВАЖНО: Запускаем планировщик
     scheduler.start()
     logger.info("")
@@ -235,7 +254,7 @@ async def health_check(request):
     return web.json_response({
         "status": "healthy", 
         "bot": "Bloom AI", 
-        "version": "5.4 - Stats Removed",
+        "version": "5.5 - Seasonal Adjustment",
         "time_msk": moscow_now.strftime('%Y-%m-%d %H:%M:%S'),
         "timezone": str(MOSCOW_TZ),
         "scheduler": {
@@ -249,7 +268,7 @@ async def health_check(request):
 async def main():
     """Main функция"""
     try:
-        logger.info("🚀 Запуск Bloom AI v5.4 (Stats Removed)...")
+        logger.info("🚀 Запуск Bloom AI v5.5 (Seasonal Adjustment)...")
         
         await on_startup()
         
@@ -267,7 +286,7 @@ async def main():
             
             logger.info("")
             logger.info("=" * 70)
-            logger.info(f"🚀 BLOOM AI v5.4 УСПЕШНО ЗАПУЩЕН")
+            logger.info(f"🚀 BLOOM AI v5.5 УСПЕШНО ЗАПУЩЕН")
             logger.info(f"🌐 Порт: {PORT}")
             logger.info(f"📡 Webhook: {WEBHOOK_URL}/webhook")
             logger.info(f"❤️ Health check: {WEBHOOK_URL}/health")
@@ -284,7 +303,7 @@ async def main():
             # Polling mode
             logger.info("")
             logger.info("=" * 70)
-            logger.info("🤖 BLOOM AI v5.4 В РЕЖИМЕ POLLING")
+            logger.info("🤖 BLOOM AI v5.5 В РЕЖИМЕ POLLING")
             logger.info("⏳ Ожидание сообщений от пользователей...")
             logger.info("=" * 70)
             
