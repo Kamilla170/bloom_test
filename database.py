@@ -868,7 +868,7 @@ class PlantDatabase:
             """, interval_days, plant_id)
     
     async def set_base_watering_interval(self, plant_id: int, base_interval: int):
-        """Установить базовый (летний) интервал полива"""
+        """Установить базовый интервал полива"""
         async with self.pool.acquire() as conn:
             await conn.execute("""
                 UPDATE plants 
@@ -877,7 +877,7 @@ class PlantDatabase:
             """, base_interval, plant_id)
     
     async def get_all_plants_for_seasonal_update(self) -> list:
-        """Получить все растения для сезонной корректировки"""
+        """Получить все растения для сезонной корректировки через GPT"""
         async with self.pool.acquire() as conn:
             rows = await conn.fetch("""
                 SELECT 
@@ -885,7 +885,6 @@ class PlantDatabase:
                     p.user_id,
                     COALESCE(p.custom_name, p.plant_name, 'Растение #' || p.id) as display_name,
                     p.plant_name,
-                    COALESCE(p.base_watering_interval, p.watering_interval, 7) as base_interval,
                     p.watering_interval as current_interval
                 FROM plants p
                 WHERE p.plant_type = 'regular'
