@@ -73,6 +73,7 @@ class PlantDatabase:
                     last_watered TIMESTAMP,
                     watering_count INTEGER DEFAULT 0,
                     watering_interval INTEGER DEFAULT 5,
+                    base_watering_interval INTEGER,
                     notes TEXT,
                     reminder_enabled BOOLEAN DEFAULT TRUE,
                     plant_type TEXT DEFAULT 'regular',
@@ -315,6 +316,7 @@ class PlantDatabase:
                 await conn.execute("ALTER TABLE plants ADD COLUMN IF NOT EXISTS growth_stage TEXT DEFAULT 'young'")
                 await conn.execute("ALTER TABLE plants ADD COLUMN IF NOT EXISTS last_photo_analysis TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
                 await conn.execute("ALTER TABLE plants ADD COLUMN IF NOT EXISTS environment_data JSONB")
+                await conn.execute("ALTER TABLE plants ADD COLUMN IF NOT EXISTS base_watering_interval INTEGER")
                 await conn.execute("ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS monthly_photo_reminder BOOLEAN DEFAULT TRUE")
                 await conn.execute("ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS last_monthly_reminder TIMESTAMP")
                 await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS onboarding_completed BOOLEAN DEFAULT FALSE")
@@ -856,7 +858,7 @@ class PlantDatabase:
             except Exception as e:
                 logger.error(f"Ошибка добавления в историю: {e}")
     
-async def update_plant_watering_interval(self, plant_id: int, interval_days: int):
+    async def update_plant_watering_interval(self, plant_id: int, interval_days: int):
         """Обновить интервал полива"""
         async with self.pool.acquire() as conn:
             await conn.execute("""
@@ -1037,9 +1039,9 @@ async def update_plant_watering_interval(self, plant_id: int, interval_days: int
                 for plant_row in plant_ids:
                     try:
                         await conn.execute("""
-    INSERT INTO care_history (plant_id, user_id, action_type, notes)
-    VALUES ($1, $2, 'watered', 'Растение полито (массовый полив)')
-""", plant_row['id'], user_id)
+                            INSERT INTO care_history (plant_id, user_id, action_type, notes)
+                            VALUES ($1, $2, 'watered', 'Растение полито (массовый полив)')
+                        """, plant_row['id'], user_id)
                     except Exception as e:
                         logger.error(f"Ошибка добавления в историю: {e}")
             
@@ -1403,89 +1405,6 @@ async def update_plant_watering_interval(self, plant_id: int, interval_days: int
                 return dict(row)
             return None
     
-    
-    # === МЕТОДЫ ДЛЯ АДМИН-ПЕРЕПИСКИ ===
-    
-    async def send_admin_message(self, from_user_id: int, to_user_id: int, message_text: str, context: dict = None) -> int:
-        """Отправить сообщение (от админа к пользователю или наоборот)"""
-        async with self.pool.acquire() as conn:
-            message_id = await conn.fetchval("""
-                INSERT INTO admin_messages (from_user_id, to_user_id, message_text, context)
-                VALUES ($1, $2, $3, $4)
-                RETURNING id
-            """, from_user_id, to_user_id, message_text, 
-                json.dumps(context) if context else None)
-            
-            return message_id
-    
-    async def get_user_messages(self, user_id: int, limit: int = 50) -> List[Dict]:
-        """Получить все сообщения пользователя (входящие и исходящие)"""
-        async with self.pool.acquire() as conn:
-            rows = await conn.fetch("""
-                SELECT 
-                    am.*,
-                    u_from.username as from_username,
-                    u_from.first_name as from_first_name,
-                    u_to.username as to_username,
-                    u_to.first_name as to_first_name
-                FROM admin_messages am
-                JOIN users u_from ON am.from_user_id = u_from.user_id
-                JOIN users u_to ON am.to_user_id = u_to.user_id
-                WHERE am.from_user_id = $1 OR am.to_user_id = $1
-                ORDER BY am.sent_at DESC
-                LIMIT $2
-            """, user_id, limit)
-            
-            return [dict(row) for row in rows]
-    
-    async def get_unread_messages(self, user_id: int) -> List[Dict]:
-        """Получить непрочитанные сообщения для пользователя"""
-        async with self.pool.acquire() as conn:
-            rows = await conn.fetch("""
-                SELECT 
-                    am.*,
-                    u_from.username as from_username,
-                    u_from.first_name as from_first_name
-                FROM admin_messages am
-                JOIN users u_from ON am.from_user_id = u_from.user_id
-                WHERE am.to_user_id = $1 
-                AND am.read = FALSE
-                ORDER BY am.sent_at ASC
-            """, user_id)
-            
-            return [dict(row) for row in rows]
-    
-    async def mark_message_read(self, message_id: int):
-        """Отметить сообщение как прочитанное"""
-        async with self.pool.acquire() as conn:
-            await conn.execute("""
-                UPDATE admin_messages
-                SET read = TRUE
-                WHERE id = $1
-            """, message_id)
-    
-    async def mark_all_messages_read(self, user_id: int):
-        """Отметить все сообщения пользователя как прочитанные"""
-        async with self.pool.acquire() as conn:
-            await conn.execute("""
-                UPDATE admin_messages
-                SET read = TRUE
-                WHERE to_user_id = $1 AND read = FALSE
-            """, user_id)
-    
-    async def get_user_info_by_id(self, user_id: int) -> Optional[Dict]:
-        """Получить информацию о пользователе по ID"""
-        async with self.pool.acquire() as conn:
-            row = await conn.fetchrow("""
-                SELECT user_id, username, first_name, created_at, last_activity,
-                       plants_count, total_waterings, questions_asked
-                FROM users
-                WHERE user_id = $1
-            """, user_id)
-            
-            if row:
-                return dict(row)
-            return None
     
     # === МЕТОДЫ ДЛЯ АДМИН-ПЕРЕПИСКИ ===
     
