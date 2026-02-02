@@ -3,13 +3,35 @@ from database import get_db
 from services.ai_service import extract_watering_info
 from services.reminder_service import create_plant_reminder
 from utils.time_utils import get_moscow_now, format_days_ago
-from utils.season_utils import get_current_season, adjust_watering_interval
+from utils.season_utils import get_current_season
 from config import STATE_EMOJI, STATE_NAMES
 
 logger = logging.getLogger(__name__)
 
 # Временное хранилище для анализов (будет перенесено в Redis в будущем)
 temp_analyses = {}
+
+
+def calculate_base_interval(current_interval: int, season: str) -> int:
+    """
+    Рассчитать базовый (летний) интервал из текущего сезонного
+    
+    Если сейчас зима и GPT выдал 12 дней, то базовый летний = 12 / 2.0 = 6 дней
+    Если сейчас лето и GPT выдал 5 дней, то базовый = 5 / 0.8 = 6 дней
+    """
+    # Обратные множители для расчёта базового из текущего
+    reverse_multipliers = {
+        'winter': 0.5,    # 12 дней зимой → 6 дней базовый
+        'spring': 1.0,    # Весной = базовый
+        'summer': 1.25,   # 5 дней летом → 6 дней базовый  
+        'autumn': 0.7     # 8 дней осенью → 6 дней базовый
+    }
+    
+    multiplier = reverse_multipliers.get(season, 1.0)
+    base = int(round(current_interval * multiplier))
+    
+    # Базовый интервал должен быть в разумных пределах (3-14 дней)
+    return max(3, min(14, base))
 
 
 async def save_analyzed_plant(user_id: int, analysis_data: dict) -> dict:
@@ -20,14 +42,25 @@ async def save_analyzed_plant(user_id: int, analysis_data: dict) -> dict:
         
         watering_info = extract_watering_info(raw_analysis)
         
-        # Получаем базовый интервал из AI анализа
-        base_interval = watering_info["interval_days"]
+        # GPT уже выдаёт интервал С УЧЁТОМ СЕЗОНА - используем напрямую!
+        # Не применяем дополнительную корректировку
+        ai_interval = watering_info["interval_days"]
         
-        # Корректируем интервал с учетом сезона
+        # Валидация: интервал должен быть в разумных пределах
+        if ai_interval < 3:
+            ai_interval = 3
+            logger.warning(f"⚠️ AI выдал слишком маленький интервал, скорректировано до 3 дней")
+        elif ai_interval > 28:
+            ai_interval = 28
+            logger.warning(f"⚠️ AI выдал слишком большой интервал, скорректировано до 28 дней")
+        
         season_info = get_current_season()
-        adjusted_interval = adjust_watering_interval(base_interval, season_info['season'])
         
-        logger.info(f"🌍 Сезон: {season_info['season_ru']}, Базовый интервал: {base_interval} дней, Скорректированный: {adjusted_interval} дней")
+        # Рассчитываем базовый (летний) интервал для хранения
+        # Это нужно для будущих сезонных корректировок
+        base_interval = calculate_base_interval(ai_interval, season_info['season'])
+        
+        logger.info(f"🌍 Сезон: {season_info['season_ru']}, AI интервал: {ai_interval} дней, Базовый (летний): {base_interval} дней")
         
         db = await get_db()
         plant_id = await db.save_plant(
@@ -37,8 +70,11 @@ async def save_analyzed_plant(user_id: int, analysis_data: dict) -> dict:
             plant_name=analysis_data.get("plant_name", "Неизвестное растение")
         )
         
-        # Устанавливаем скорректированный интервал полива
-        await db.update_plant_watering_interval(plant_id, adjusted_interval)
+        # Устанавливаем интервал полива от AI
+        await db.update_plant_watering_interval(plant_id, ai_interval)
+        
+        # Сохраняем базовый (летний) интервал для будущих сезонных корректировок
+        await db.set_base_watering_interval(plant_id, base_interval)
         
         # Сохраняем состояние растения
         current_state = state_info.get('current_state', 'healthy')
@@ -69,8 +105,8 @@ async def save_analyzed_plant(user_id: int, analysis_data: dict) -> dict:
             lighting_advice=None
         )
         
-        # Создаем напоминание с учетом сезона
-        await create_plant_reminder(plant_id, user_id, adjusted_interval)
+        # Создаем напоминание с интервалом от AI
+        await create_plant_reminder(plant_id, user_id, ai_interval)
         
         plant_name = analysis_data.get("plant_name", "растение")
         state_emoji = STATE_EMOJI.get(current_state, '🌱')
@@ -83,7 +119,7 @@ async def save_analyzed_plant(user_id: int, analysis_data: dict) -> dict:
             "state": current_state,
             "state_emoji": state_emoji,
             "state_name": state_name,
-            "interval": adjusted_interval,
+            "interval": ai_interval,
             "season": season_info['season_ru']
         }
         
@@ -190,12 +226,8 @@ async def water_plant(user_id: int, plant_id: int) -> dict:
         
         await db.update_watering(user_id, plant_id)
         
-        # Получаем интервал с учетом сезона
-        base_interval = plant.get('watering_interval', 5)
-        season_info = get_current_season()
-        
-        # Интервал уже должен быть скорректирован в БД, но на всякий случай проверяем
-        interval = base_interval
+        # Используем интервал из БД (уже установлен AI с учётом сезона)
+        interval = plant.get('watering_interval', 7)
         
         await create_plant_reminder(plant_id, user_id, interval)
         
@@ -275,7 +307,7 @@ async def get_plant_details(plant_id: int, user_id: int) -> dict:
         current_state = plant.get('current_state', 'healthy')
         state_emoji = STATE_EMOJI.get(current_state, '🌱')
         state_name = STATE_NAMES.get(current_state, 'Здоровое')
-        watering_interval = plant.get('watering_interval', 5)
+        watering_interval = plant.get('watering_interval', 7)
         state_changes = plant.get('state_changes_count', 0)
         water_status = format_days_ago(plant.get('last_watered'))
         
