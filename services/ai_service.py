@@ -75,7 +75,7 @@ def extract_plant_state_from_analysis(raw_analysis: str) -> dict:
 def extract_watering_info(analysis_text: str) -> dict:
     """Извлечь информацию о поливе"""
     watering_info = {
-        "interval_days": 5,
+        "interval_days": 7,  # Изменено с 5 на 7 как более безопасный default
         "personal_recommendations": "",
         "current_state": "",
         "needs_adjustment": False
@@ -96,7 +96,7 @@ def extract_watering_info(analysis_text: str) -> dict:
             if numbers:
                 try:
                     interval = int(numbers[0])
-                    if 2 <= interval <= 20:
+                    if 2 <= interval <= 28:
                         watering_info["interval_days"] = interval
                 except:
                     pass
@@ -114,6 +114,51 @@ def extract_watering_info(analysis_text: str) -> dict:
             watering_info["personal_recommendations"] = recommendations
             
     return watering_info
+
+
+def extract_and_remove_watering_interval(text: str, season_info: dict) -> tuple:
+    """
+    Извлечь интервал полива из текста и удалить эту строку.
+    
+    Args:
+        text: текст ответа от GPT
+        season_info: информация о сезоне для определения default
+        
+    Returns:
+        tuple: (interval: int, clean_text: str)
+    """
+    import re
+    
+    # Default интервал зависит от сезона
+    default_interval = 10  # Безопасный default для зимы
+    if season_info.get('season') == 'summer':
+        default_interval = 7
+    elif season_info.get('season') == 'winter':
+        default_interval = 12
+    
+    interval = default_interval
+    clean_text = text
+    
+    # Ищем строку ПОЛИВ_ИНТЕРВАЛ: число
+    pattern = r'\n?ПОЛИВ_ИНТЕРВАЛ:\s*(\d+)\s*'
+    match = re.search(pattern, text)
+    
+    if match:
+        try:
+            interval = int(match.group(1))
+            # Валидация
+            interval = max(3, min(28, interval))
+            logger.info(f"💧 Извлечён интервал полива: {interval} дней")
+        except:
+            logger.warning(f"⚠️ Не удалось извлечь интервал, используем default: {default_interval}")
+            interval = default_interval
+        
+        # Удаляем строку из текста
+        clean_text = re.sub(pattern, '', text).strip()
+    else:
+        logger.warning(f"⚠️ Строка ПОЛИВ_ИНТЕРВАЛ не найдена, используем default: {default_interval}")
+    
+    return interval, clean_text
 
 
 async def analyze_vision_step(image_data: bytes, user_question: str = None, previous_state: str = None) -> dict:
@@ -265,7 +310,8 @@ async def analyze_reasoning_step(vision_result: dict, plant_context: str = None,
             "reasoning": str,  # Объяснение почему
             "action_plan": str,  # План действий
             "adapted_recommendations": str,  # Адаптированные рекомендации
-            "full_analysis": str  # Полный анализ для пользователя
+            "full_analysis": str,  # Полный анализ для пользователя
+            "watering_interval": int  # Интервал полива в днях
         }
     """
     if not openai_client:
@@ -324,7 +370,19 @@ async def analyze_reasoning_step(vision_result: dict, plant_context: str = None,
 Абзац 3: АДАПТАЦИЯ - как адаптировать уход под текущий сезон и условия
 Абзац 4 (при необходимости): КОНТРОЛЬ - когда ожидать результат
 
-ОБЯЗАТЕЛЬНО учитывайте текущий сезон в рекомендациях по поливу и уходу!"""
+ОБЯЗАТЕЛЬНО учитывайте текущий сезон в рекомендациях по поливу и уходу!
+
+ТИПИЧНЫЕ ИНТЕРВАЛЫ ПОЛИВА ДЛЯ ЗИМЫ:
+- Суккуленты, кактусы: 21-28 дней
+- Фикусы, монстеры: 12-16 дней  
+- Спатифиллум, папоротники: 7-10 дней
+- Драцены, юкки: 14-21 дней
+- Пальмы: 12-16 дней
+
+В САМОМ КОНЦЕ ответа ОБЯЗАТЕЛЬНО добавьте отдельной строкой:
+ПОЛИВ_ИНТЕРВАЛ: [число от 3 до 28]
+
+Это число - рекомендуемый интервал полива в днях с учётом вида растения и текущего сезона ({season_info['season_ru']})."""
         
         # Используем GPT-5.1 для reasoning (Chat Completions API)
         logger.info(f"🧠 Reasoning анализ: использую модель {GPT_5_1_MODEL}")
@@ -344,9 +402,12 @@ async def analyze_reasoning_step(vision_result: dict, plant_context: str = None,
         if not reasoning_text or len(reasoning_text) < 50:
             raise Exception("Некачественный ответ от reasoning модели")
         
-        logger.info(f"✅ Reasoning анализ завершен (модель: {GPT_5_1_MODEL}, сезон: {season_info['season_ru']})")
+        # Извлекаем интервал полива и удаляем строку из текста
+        watering_interval, clean_reasoning = extract_and_remove_watering_interval(reasoning_text, season_info)
         
-        # Формируем полный анализ для пользователя
+        logger.info(f"✅ Reasoning анализ завершен (модель: {GPT_5_1_MODEL}, сезон: {season_info['season_ru']}, интервал: {watering_interval} дней)")
+        
+        # Формируем полный анализ для пользователя (без строки ПОЛИВ_ИНТЕРВАЛ)
         full_analysis = f"""🌱 <b>Растение:</b> {vision_result.get('plant_name', 'Неизвестное растение')}
 📊 <b>Уверенность:</b> {vision_result.get('confidence', 50)}%
 
@@ -354,14 +415,15 @@ async def analyze_reasoning_step(vision_result: dict, plant_context: str = None,
 {vision_result.get('vision_analysis', '')}
 
 <b>Рекомендации:</b>
-{reasoning_text}"""
+{clean_reasoning}"""
         
         return {
             "success": True,
-            "reasoning": reasoning_text,
-            "action_plan": reasoning_text,  # План действий включен в reasoning
-            "adapted_recommendations": reasoning_text,  # Адаптированные рекомендации включены
-            "full_analysis": full_analysis
+            "reasoning": clean_reasoning,
+            "action_plan": clean_reasoning,  # План действий включен в reasoning
+            "adapted_recommendations": clean_reasoning,  # Адаптированные рекомендации включены
+            "full_analysis": full_analysis,
+            "watering_interval": watering_interval
         }
         
     except Exception as e:
@@ -380,7 +442,12 @@ async def analyze_reasoning_step(vision_result: dict, plant_context: str = None,
             )
             
             reasoning_text = response.choices[0].message.content
-            logger.info(f"✅ Reasoning анализ завершен (модель: GPT-4o fallback, сезон: {season_info['season_ru']})")
+            
+            # Извлекаем интервал полива и удаляем строку из текста
+            watering_interval, clean_reasoning = extract_and_remove_watering_interval(reasoning_text, season_info)
+            
+            logger.info(f"✅ Reasoning анализ завершен (модель: GPT-4o fallback, сезон: {season_info['season_ru']}, интервал: {watering_interval} дней)")
+            
             full_analysis = f"""🌱 <b>Растение:</b> {vision_result.get('plant_name', 'Неизвестное растение')}
 📊 <b>Уверенность:</b> {vision_result.get('confidence', 50)}%
 
@@ -388,14 +455,15 @@ async def analyze_reasoning_step(vision_result: dict, plant_context: str = None,
 {vision_result.get('vision_analysis', '')}
 
 <b>Рекомендации:</b>
-{reasoning_text}"""
+{clean_reasoning}"""
             
             return {
                 "success": True,
-                "reasoning": reasoning_text,
-                "action_plan": reasoning_text,
-                "adapted_recommendations": reasoning_text,
-                "full_analysis": full_analysis
+                "reasoning": clean_reasoning,
+                "action_plan": clean_reasoning,
+                "adapted_recommendations": clean_reasoning,
+                "full_analysis": full_analysis,
+                "watering_interval": watering_interval
             }
         except Exception as fallback_error:
             logger.error(f"❌ Fallback reasoning ошибка: {fallback_error}")
@@ -528,7 +596,7 @@ async def analyze_plant_image(image_data: bytes, user_question: str = None,
                              previous_state: str = None, retry_count: int = 0, plant_context: str = None) -> dict:
     """Анализ изображения растения - ДВУХЭТАПНЫЙ ПРОЦЕСС:
     Шаг 1: Vision (gpt-4o) - что видно, проблемы, уверенность
-    Шаг 2: Reasoning (gpt-5.1) - объясняет почему, план действий, адаптация"""
+    Шаг 2: Reasoning (gpt-5.1) - объясняет почему, план действий, адаптация + интервал полива"""
     
     logger.info("🔍 Начало двухэтапного анализа: Vision → Reasoning")
     
@@ -546,7 +614,7 @@ async def analyze_plant_image(image_data: bytes, user_question: str = None,
                 return openai_result
         return {"success": False, "error": vision_result.get("error", "Vision анализ не удался")}
     
-    # ШАГ 2: Reasoning анализ через GPT-5.1
+    # ШАГ 2: Reasoning анализ через GPT-5.1 (включает извлечение интервала полива)
     logger.info(f"🧠 Шаг 2: Reasoning анализ ({GPT_5_1_MODEL})...")
     reasoning_result = await analyze_reasoning_step(vision_result, plant_context, user_question)
     
@@ -561,70 +629,34 @@ async def analyze_plant_image(image_data: bytes, user_question: str = None,
             "confidence": vision_result.get('confidence', 50),
             "source": "vision_only",
             "state_info": extract_plant_state_from_analysis(vision_result.get('raw_observations', '')),
+            "watering_interval": 10,  # Default для fallback
             "needs_retry": True
         }
     
-    # Успешный двухэтапный анализ
-    logger.info(f"✅ Двухэтапный анализ завершен успешно (уверенность: {vision_result.get('confidence', 50)}%)")
+    # Получаем интервал из reasoning результата
+    watering_interval = reasoning_result.get('watering_interval', 10)
+    plant_name = vision_result.get('plant_name', 'Неизвестное растение')
+    
+    logger.info(f"✅ Двухэтапный анализ завершен (уверенность: {vision_result.get('confidence', 50)}%, интервал: {watering_interval} дней)")
     
     # Извлекаем состояние из vision анализа
     state_info = extract_plant_state_from_analysis(vision_result.get('raw_observations', ''))
     
+    # Добавляем интервал в raw_analysis для совместимости с extract_watering_info
+    raw_analysis_with_interval = f"ПОЛИВ_ИНТЕРВАЛ: {watering_interval}\n" + vision_result.get('raw_observations', '')
+    
     return {
         "success": True,
         "analysis": reasoning_result.get("full_analysis", reasoning_result.get("reasoning", "")),
-        "raw_analysis": f"VISION:\n{vision_result.get('raw_observations', '')}\n\nREASONING:\n{reasoning_result.get('reasoning', '')}",
-        "plant_name": vision_result.get('plant_name', 'Неизвестное растение'),
+        "raw_analysis": raw_analysis_with_interval,
+        "plant_name": plant_name,
         "confidence": vision_result.get('confidence', 50),
         "source": "two_stage_analysis",
         "state_info": state_info,
         "vision_result": vision_result,
         "reasoning_result": reasoning_result,
+        "watering_interval": watering_interval,
         "needs_retry": vision_result.get('confidence', 50) < 50
-    }
-    
-    # Fallback текст с учетом сезона
-    season_data = get_current_season()
-    
-    # ИСПРАВЛЕНО: вычисляем корректировку для fallback
-    water_adjustment_days = 0
-    if season_data['season'] == 'winter':
-        water_adjustment_days = +5
-    elif season_data['season'] == 'summer':
-        water_adjustment_days = -2
-    elif season_data['season'] == 'autumn':
-        water_adjustment_days = +2
-    
-    fallback_text = f"""
-РАСТЕНИЕ: Комнатное растение (требуется идентификация)
-УВЕРЕННОСТЬ: 20%
-ТЕКУЩЕЕ_СОСТОЯНИЕ: healthy
-ПРИЧИНА_СОСТОЯНИЯ: Недостаточно данных
-ЭТАП_РОСТА: young
-СОСТОЯНИЕ: Требуется визуальный осмотр
-ПОЛИВ_АНАЛИЗ: Субстрат не виден на фото
-ПОЛИВ_РЕКОМЕНДАЦИИ: Проверяйте влажность почвы. Сейчас {season_data['season_ru']} - {season_data['growth_phase'].lower()}
-ПОЛИВ_ИНТЕРВАЛ: {5 + water_adjustment_days}
-СВЕТ: Яркий рассеянный свет. {season_data['light_hours']}
-ТЕМПЕРАТУРА: {season_data['temperature_note']}
-ВЛАЖНОСТЬ: 40-60%
-ПОДКОРМКА: {season_data['watering_adjustment']}
-СОВЕТ: Сделайте фото при хорошем освещении для точной идентификации
-    """.strip()
-    
-    state_info = extract_plant_state_from_analysis(fallback_text)
-    formatted_analysis = format_plant_analysis(fallback_text, 20, state_info)
-    
-    return {
-        "success": True,
-        "analysis": formatted_analysis,
-        "raw_analysis": fallback_text,
-        "plant_name": "Неопознанное растение",
-        "confidence": 20,
-        "source": "fallback",
-        "needs_retry": True,
-        "state_info": state_info,
-        "season_data": season_data
     }
 
 
