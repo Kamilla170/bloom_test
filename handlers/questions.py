@@ -7,6 +7,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from states.user_states import PlantStates
 from services.ai_service import answer_plant_question
+from services.subscription_service import check_limit, increment_usage
 from plant_memory import get_plant_context, save_interaction
 from keyboards.main_menu import main_menu
 from database import get_db
@@ -184,6 +185,14 @@ async def handle_question(message: types.Message, state: FSMContext):
             await state.clear()
             return
         
+        # Проверка лимита вопросов
+        allowed, error_msg = await check_limit(user_id, 'questions')
+        if not allowed:
+            from handlers.subscription import send_limit_message
+            await send_limit_message(message, error_msg)
+            await state.clear()
+            return
+        
         logger.info(f"❓ Вопрос от user_id={user_id}: {question_text[:50]}...")
         
         # Получаем данные из состояния
@@ -245,6 +254,9 @@ async def handle_question(message: types.Message, state: FSMContext):
             logger.info(f"✅ Ответ от модели: {model_name}")
         
         if answer_text and len(answer_text) > 50 and not answer_text.startswith("❌"):
+            # Увеличиваем счётчик использования
+            await increment_usage(user_id, 'questions')
+            
             # Сохраняем взаимодействие
             if plant_id:
                 await save_interaction(
