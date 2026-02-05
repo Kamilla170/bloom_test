@@ -264,11 +264,23 @@ async def handle_question(message: types.Message, state: FSMContext):
             response_text += answer_text
             response_text += "\n\n💬 <i>Можете задать ещё вопрос или завершить диалог</i>"
             
-            await message.reply(
-                response_text,
-                parse_mode="HTML" if "<" in answer_text else None,
-                reply_markup=question_continue_keyboard()
-            )
+            # Пробуем отправить с HTML, если ошибка - без форматирования
+            try:
+                await message.reply(
+                    response_text,
+                    parse_mode="HTML",
+                    reply_markup=question_continue_keyboard()
+                )
+            except Exception as parse_error:
+                # Ошибка парсинга HTML - отправляем без форматирования
+                logger.warning(f"⚠️ Ошибка HTML разметки, отправляю без форматирования: {parse_error}")
+                # Убираем HTML теги для безопасной отправки
+                import re
+                clean_text = re.sub(r'<[^>]+>', '', response_text)
+                await message.reply(
+                    clean_text,
+                    reply_markup=question_continue_keyboard()
+                )
         else:
             await message.reply(
                 "🤔 Не удалось сформировать ответ. Попробуйте переформулировать вопрос.",
