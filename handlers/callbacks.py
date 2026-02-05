@@ -96,10 +96,10 @@ async def grow_from_scratch_callback(callback: types.CallbackQuery, state: FSMCo
 
 
 @router.callback_query(F.data == "save_plant")
-async def save_plant_callback(callback: types.CallbackQuery):
-    """Сохранить проанализированное растение"""
+async def save_plant_callback(callback: types.CallbackQuery, state: FSMContext):
+    """Сохранить проанализированное растение - теперь с выбором даты полива"""
     from handlers.plants import save_plant_handler
-    await save_plant_handler(callback)
+    await save_plant_handler(callback, state)
 
 
 @router.callback_query(F.data == "toggle_reminders")
