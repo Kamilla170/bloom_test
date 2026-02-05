@@ -39,20 +39,15 @@ async def reanalyze_callback(callback: types.CallbackQuery):
     await callback.answer()
 
 
-@router.callback_query(F.data == "question")
-async def question_callback(callback: types.CallbackQuery, state: FSMContext):
-    """Спросить ИИ"""
-    await callback.message.answer("🤖 <b>Спросите ИИ о растениях</b>\n\n✍️ Напишите ваш вопрос:", parse_mode="HTML")
-    await state.set_state(PlantStates.waiting_question)
-    await callback.answer()
+# Обработчик "question" перенесён в handlers/questions.py
 
 
 @router.callback_query(F.data == "ask_about")
 async def ask_about_callback(callback: types.CallbackQuery, state: FSMContext):
-    """Вопрос о текущем растении"""
-    await callback.message.answer("🤖 <b>Спросите ИИ о растении</b>\n\n✍️ Напишите вопрос:", parse_mode="HTML")
-    await state.set_state(PlantStates.waiting_question)
-    await callback.answer()
+    """Вопрос о текущем растении (legacy - для обратной совместимости)"""
+    # Перенаправляем в новый режим вопросов
+    from handlers.questions import start_question_mode_callback
+    await start_question_mode_callback(callback, state)
 
 
 @router.callback_query(F.data == "help")
