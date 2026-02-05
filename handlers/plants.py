@@ -10,6 +10,7 @@ from services.plant_service import (
     water_plant, water_all_plants, delete_plant, rename_plant,
     get_plant_details, get_plant_state_history
 )
+from services.subscription_service import check_limit
 from keyboards.main_menu import main_menu, simple_back_menu
 from keyboards.plant_menu import plant_control_menu, delete_confirmation
 from config import STATE_EMOJI, STATE_NAMES
@@ -470,6 +471,13 @@ async def save_plant_handler(callback: types.CallbackQuery, state: FSMContext):
     if user_id not in temp_analyses:
         await callback.message.answer("❌ Нет данных. Сначала проанализируйте растение")
         await callback.answer()
+        return
+    
+    # Проверка лимита растений
+    allowed, error_msg = await check_limit(user_id, 'plants')
+    if not allowed:
+        from handlers.subscription import send_limit_message
+        await send_limit_message(callback, error_msg)
         return
     
     analysis_data = temp_analyses[user_id]
