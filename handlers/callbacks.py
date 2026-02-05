@@ -66,8 +66,49 @@ async def help_callback(callback: types.CallbackQuery):
 @router.callback_query(F.data == "stats")
 async def stats_callback(callback: types.CallbackQuery):
     """Статистика"""
-    from handlers.commands import stats_command
-    await stats_command(callback.message)
+    # ВАЖНО: берём user_id из callback, а не из message (message.from_user - это бот!)
+    user_id = callback.from_user.id
+    
+    try:
+        from database import get_db
+        from keyboards.main_menu import main_menu
+        from datetime import datetime
+        import logging
+        
+        logger = logging.getLogger(__name__)
+        logger.info(f"📊 Запрос статистики (callback) от user_id={user_id}")
+        
+        db = await get_db()
+        stats = await db.get_user_stats(user_id)
+        
+        logger.info(f"📊 Статистика для user_id={user_id}: plants={stats['total_plants']}, waterings={stats['total_waterings']}")
+        
+        stats_text = f"📊 <b>Ваша статистика</b>\n\n"
+        stats_text += f"🌱 <b>Растений:</b> {stats['total_plants']}\n"
+        stats_text += f"💧 <b>Поливов:</b> {stats['total_waterings']}\n"
+        
+        if stats['total_growing'] > 0:
+            stats_text += f"\n🌿 <b>Выращивание:</b>\n"
+            stats_text += f"• Активных: {stats['active_growing']}\n"
+            stats_text += f"• Завершенных: {stats['completed_growing']}\n"
+        
+        if stats['first_plant_date']:
+            days_using = (datetime.now().date() - stats['first_plant_date'].date()).days
+            stats_text += f"\n📅 <b>Используете бота:</b> {days_using} дней\n"
+        
+        stats_text += f"\n🎯 <b>Продолжайте ухаживать за растениями!</b>"
+        
+        await callback.message.answer(
+            stats_text,
+            parse_mode="HTML",
+            reply_markup=main_menu()
+        )
+        
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error(f"❌ Ошибка статистики: {e}", exc_info=True)
+        await callback.message.answer("❌ Ошибка загрузки статистики")
+    
     await callback.answer()
 
 
