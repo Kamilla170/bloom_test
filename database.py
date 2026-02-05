@@ -308,6 +308,55 @@ class PlantDatabase:
                 )
             """)
             
+            # === ТАБЛИЦЫ ПОДПИСКИ ===
+            
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS subscriptions (
+                    user_id BIGINT PRIMARY KEY,
+                    plan TEXT NOT NULL DEFAULT 'free',
+                    expires_at TIMESTAMP,
+                    auto_pay_method_id TEXT,
+                    granted_by_admin BIGINT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users (user_id) ON DELETE CASCADE
+                )
+            """)
+            
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS usage_limits (
+                    user_id BIGINT PRIMARY KEY,
+                    analyses_used INTEGER NOT NULL DEFAULT 0,
+                    questions_used INTEGER NOT NULL DEFAULT 0,
+                    reset_date TIMESTAMP NOT NULL,
+                    FOREIGN KEY (user_id) REFERENCES users (user_id) ON DELETE CASCADE
+                )
+            """)
+            
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS payments (
+                    id SERIAL PRIMARY KEY,
+                    payment_id TEXT UNIQUE NOT NULL,
+                    user_id BIGINT NOT NULL,
+                    amount INTEGER NOT NULL,
+                    currency TEXT NOT NULL DEFAULT 'RUB',
+                    status TEXT NOT NULL,
+                    description TEXT,
+                    payment_method_id TEXT,
+                    is_recurring BOOLEAN DEFAULT FALSE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users (user_id) ON DELETE CASCADE
+                )
+            """)
+            
+            # Индексы для подписки
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_subscriptions_plan ON subscriptions(plan)")
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_subscriptions_expires ON subscriptions(expires_at)")
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_payments_user_id ON payments(user_id)")
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status)")
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_payments_payment_id ON payments(payment_id)")
+            
             # Добавляем новые колонки
             try:
                 await conn.execute("ALTER TABLE plants ADD COLUMN IF NOT EXISTS current_state TEXT DEFAULT 'healthy'")
@@ -637,6 +686,16 @@ class PlantDatabase:
             
             logger.info("✅ Существующие данные обновлены")
 
+            # === МИГРАЦИЯ: Создание подписок для существующих пользователей ===
+            logger.info("💳 Миграция подписок для существующих пользователей...")
+            await conn.execute("""
+                INSERT INTO subscriptions (user_id, plan)
+                SELECT user_id, 'free' FROM users
+                WHERE user_id NOT IN (SELECT user_id FROM subscriptions)
+                ON CONFLICT (user_id) DO NOTHING
+            """)
+            logger.info("✅ Подписки для существующих пользователей созданы")
+
             logger.info("✅ Все миграции применены успешно")
     
     def extract_plant_name_from_analysis(self, analysis_text: str) -> str:
@@ -680,6 +739,13 @@ class PlantDatabase:
             await conn.execute("""
                 INSERT INTO user_settings (user_id)
                 VALUES ($1)
+                ON CONFLICT (user_id) DO NOTHING
+            """, user_id)
+            
+            # Создаём запись подписки (free по умолчанию)
+            await conn.execute("""
+                INSERT INTO subscriptions (user_id, plan)
+                VALUES ($1, 'free')
                 ON CONFLICT (user_id) DO NOTHING
             """, user_id)
     
