@@ -189,7 +189,7 @@ async def analyze_vision_step(image_data: bytes, user_question: str = None, prev
 3. Оцените уровень уверенности в своих наблюдениях (0-100%)
 
 ФОРМАТ ОТВЕТА (строго соблюдайте):
-РАСТЕНИЕ: [название или "Неизвестное растение" если не уверены]
+РАСТЕНИЕ: [конкретное название растения, например: Фикус Бенджамина, Монстера, Сенполия. Если не можете определить точно - напишите наиболее вероятный вариант]
 УВЕРЕННОСТЬ: [число от 0 до 100]%
 
 ЧТО ВИДНО:
@@ -258,7 +258,21 @@ async def analyze_vision_step(image_data: bytes, user_question: str = None, prev
             line = line.strip()
             
             if line.startswith("РАСТЕНИЕ:"):
-                plant_name = line.replace("РАСТЕНИЕ:", "").strip()
+                raw_name = line.replace("РАСТЕНИЕ:", "").strip()
+                # Очищаем от "Неизвестное растение (возможно, X)" → "X"
+                import re
+                if "неизвестное растение" in raw_name.lower() and "(" in raw_name:
+                    # Извлекаем то что в скобках
+                    match = re.search(r'\((?:возможно,?\s*)?([^)]+)\)', raw_name, re.IGNORECASE)
+                    if match:
+                        plant_name = match.group(1).strip()
+                    else:
+                        plant_name = raw_name
+                else:
+                    # Убираем "(возможно)" если есть
+                    plant_name = re.sub(r'\s*\(возможно[^)]*\)\s*', '', raw_name, flags=re.IGNORECASE).strip()
+                    if not plant_name:
+                        plant_name = raw_name
             elif line.startswith("УВЕРЕННОСТЬ:"):
                 try:
                     conf_str = line.replace("УВЕРЕННОСТЬ:", "").strip().replace("%", "")
@@ -561,9 +575,21 @@ async def analyze_with_openai_advanced(image_data: bytes, user_question: str = N
         
         # Извлекаем название растения
         plant_name = "Неизвестное растение"
+        import re
         for line in raw_analysis.split('\n'):
             if line.startswith("РАСТЕНИЕ:"):
-                plant_name = line.replace("РАСТЕНИЕ:", "").strip()
+                raw_name = line.replace("РАСТЕНИЕ:", "").strip()
+                # Очищаем от "Неизвестное растение (возможно, X)" → "X"
+                if "неизвестное растение" in raw_name.lower() and "(" in raw_name:
+                    match = re.search(r'\((?:возможно,?\s*)?([^)]+)\)', raw_name, re.IGNORECASE)
+                    if match:
+                        plant_name = match.group(1).strip()
+                    else:
+                        plant_name = raw_name
+                else:
+                    plant_name = re.sub(r'\s*\(возможно[^)]*\)\s*', '', raw_name, flags=re.IGNORECASE).strip()
+                    if not plant_name:
+                        plant_name = raw_name
                 break
         
         # Извлекаем состояние
