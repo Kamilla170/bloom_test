@@ -361,6 +361,15 @@ class PlantDatabase:
             except Exception as e:
                 logger.info(f"Миграция care_history уже выполнена: {e}")
 
+            # Миграция: установить plant_type = 'regular' для всех NULL
+            try:
+                updated = await conn.execute("""
+                    UPDATE plants SET plant_type = 'regular' WHERE plant_type IS NULL
+                """)
+                logger.info(f"✅ Миграция plant_type: обновлено записей")
+            except Exception as e:
+                logger.info(f"Миграция plant_type: {e}")
+
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_care_history_user_id ON care_history(user_id)")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_care_history_date ON care_history(action_date DESC)")
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_care_history_user_date ON care_history(user_id, action_date DESC)")
@@ -939,7 +948,7 @@ class PlantDatabase:
                        notes, plant_type, growing_id,
                        current_state, state_changed_date, state_changes_count
                 FROM plants 
-                WHERE user_id = $1 AND plant_type = 'regular'
+                WHERE user_id = $1 AND (plant_type = 'regular' OR plant_type IS NULL)
                 ORDER BY saved_date DESC
                 LIMIT $2
             """, user_id, limit)
@@ -1212,6 +1221,7 @@ class PlantDatabase:
     async def get_user_stats(self, user_id: int) -> Dict:
         """Статистика пользователя"""
         async with self.pool.acquire() as conn:
+            # Статистика по обычным растениям (без фильтра plant_type для совместимости)
             regular_stats = await conn.fetchrow("""
                 SELECT 
                     COUNT(*) as total_plants,
@@ -1221,7 +1231,7 @@ class PlantDatabase:
                     MIN(saved_date) as first_plant_date,
                     MAX(last_watered) as last_watered_date
                 FROM plants 
-                WHERE user_id = $1 AND plant_type = 'regular'
+                WHERE user_id = $1
             """, user_id)
             
             growing_stats = await conn.fetchrow("""
