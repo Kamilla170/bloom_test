@@ -461,9 +461,11 @@ async def snooze_reminder_callback(callback: types.CallbackQuery):
 
 # === СОХРАНЕНИЕ РАСТЕНИЯ С ВЫБОРОМ ДАТЫ ПОЛИВА ===
 
-async def save_plant_handler(callback: types.CallbackQuery, state: FSMContext = None):
+async def save_plant_handler(callback: types.CallbackQuery, state: FSMContext):
     """Начало сохранения - показываем выбор даты последнего полива"""
     user_id = callback.from_user.id
+    
+    logger.info(f"💾 save_plant_handler вызван для user_id={user_id}")
     
     if user_id not in temp_analyses:
         await callback.message.answer("❌ Нет данных. Сначала проанализируйте растение")
@@ -473,10 +475,11 @@ async def save_plant_handler(callback: types.CallbackQuery, state: FSMContext = 
     analysis_data = temp_analyses[user_id]
     plant_name = analysis_data.get("plant_name", "растение")
     
-    # Сохраняем данные в state для последующего использования
-    if state:
-        await state.update_data(saving_plant=True)
-        await state.set_state(PlantStates.waiting_last_watering)
+    # Устанавливаем состояние ожидания даты полива
+    await state.update_data(saving_plant=True)
+    await state.set_state(PlantStates.waiting_last_watering)
+    
+    logger.info(f"✅ Состояние установлено: waiting_last_watering для user_id={user_id}")
     
     await callback.message.answer(
         f"💧 <b>Когда последний раз поливали {plant_name}?</b>\n\n"
@@ -527,6 +530,8 @@ async def handle_last_water_text(message: types.Message, state: FSMContext):
     """Обработка текстового ввода даты полива"""
     user_id = message.from_user.id
     
+    logger.info(f"📅 handle_last_water_text вызван для user_id={user_id}, текст='{message.text}'")
+    
     if user_id not in temp_analyses:
         await message.reply("❌ Данные потеряны. Проанализируйте растение заново.")
         await state.clear()
@@ -534,6 +539,8 @@ async def handle_last_water_text(message: types.Message, state: FSMContext):
     
     # Пробуем распарсить дату
     parsed_date = parse_user_date(message.text)
+    
+    logger.info(f"📅 Результат парсинга: {parsed_date}")
     
     if parsed_date:
         # Успешно распарсили
