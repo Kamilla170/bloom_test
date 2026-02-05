@@ -17,11 +17,28 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 PORT = int(os.getenv("PORT", 8000))
 
+# YooKassa
+YOOKASSA_SHOP_ID = os.getenv("YOOKASSA_SHOP_ID")
+YOOKASSA_SECRET_KEY = os.getenv("YOOKASSA_SECRET_KEY")
+
 # Часовой пояс
 MOSCOW_TZ = pytz.timezone('Europe/Moscow')
 
 # Администраторы (получают ежедневную статистику)
 ADMIN_USER_IDS = [455263261, 8390994875]
+
+# === ПОДПИСКА ===
+# Лимиты бесплатного плана (в месяц)
+FREE_LIMITS = {
+    'plants': 3,        # максимум растений в коллекции
+    'analyses': 3,      # анализов фото в месяц
+    'questions': 3,     # вопросов в месяц
+}
+
+# Стоимость PRO подписки
+PRO_PRICE = 199  # рублей в месяц
+PRO_DURATION_DAYS = 30
+PRO_GRACE_PERIOD_DAYS = 3  # дней после неудачного автоплатежа
 
 # Маппинг состояний растений
 STATE_EMOJI = {
@@ -189,3 +206,5 @@ def validate_config():
     logger.info(f"🔑 PLANTID_API_KEY: {'✅ Установлен' if PLANTID_API_KEY else '❌ Отсутствует'}")
     logger.info(f"🌐 WEBHOOK_URL: {WEBHOOK_URL if WEBHOOK_URL else '❌ Не установлен (polling режим)'}")
     logger.info(f"👨‍💼 ADMIN_USER_IDS: {ADMIN_USER_IDS}")
+    logger.info(f"💳 YOOKASSA_SHOP_ID: {'✅ Установлен' if YOOKASSA_SHOP_ID else '❌ Отсутствует'}")
+    logger.info(f"💳 YOOKASSA_SECRET_KEY: {'✅ Установлен' if YOOKASSA_SECRET_KEY else '❌ Отсутствует'}")
