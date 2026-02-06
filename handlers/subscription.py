@@ -116,7 +116,7 @@ async def subscription_command(message: types.Message):
 @router.callback_query(F.data == "subscribe_pro")
 async def subscribe_pro_callback(callback: types.CallbackQuery):
     """Оформление подписки — создание платежа"""
-    user_id = callback.from_user.id
+    user_id = callback.from_user.id  # ИСПРАВЛЕНО: было callback.message.from_user.id
     
     # Проверяем, может уже PRO
     if await is_pro(user_id):
@@ -161,7 +161,7 @@ async def subscribe_pro_callback(callback: types.CallbackQuery):
 @router.callback_query(F.data == "cancel_auto_pay")
 async def cancel_auto_pay_callback(callback: types.CallbackQuery):
     """Отключение автопродления"""
-    user_id = callback.from_user.id
+    user_id = callback.from_user.id  # ИСПРАВЛЕНО: было callback.message.from_user.id
     
     await cancel_auto_payment(user_id)
     
@@ -182,8 +182,43 @@ async def cancel_auto_pay_callback(callback: types.CallbackQuery):
 @router.callback_query(F.data == "show_subscription")
 async def show_subscription_callback(callback: types.CallbackQuery):
     """Показать информацию о подписке"""
-    # Создаём фиктивный message для вызова pro_command
-    await pro_command(callback.message)
+    user_id = callback.from_user.id  # ИСПРАВЛЕНО: было callback.message.from_user.id
+    
+    plan_info = await get_user_plan(user_id)
+    
+    if plan_info['plan'] == 'pro':
+        expires_str = plan_info['expires_at'].strftime('%d.%m.%Y') if plan_info['expires_at'] else '—'
+        auto_text = "✅ Автопродление включено" if plan_info['auto_pay'] else "❌ Автопродление выключено"
+        grace_text = "\n⚠️ <b>Grace period — продлите подписку!</b>" if plan_info['is_grace_period'] else ""
+        
+        await callback.message.answer(
+            f"⭐ <b>Ваш план: PRO</b>\n\n"
+            f"📅 Активна до: <b>{expires_str}</b>\n"
+            f"📆 Осталось дней: <b>{plan_info['days_left']}</b>\n"
+            f"{auto_text}"
+            f"{grace_text}\n\n"
+            f"🌱 Без ограничений на растения, анализы и вопросы",
+            parse_mode="HTML",
+            reply_markup=subscription_manage_keyboard(plan_info)
+        )
+    else:
+        stats = await get_usage_stats(user_id)
+        
+        await callback.message.answer(
+            f"🌱 <b>Ваш план: FREE</b>\n\n"
+            f"<b>Использование в этом месяце:</b>\n"
+            f"🌱 Растений: {stats['plants_count']}/{stats['plants_limit']}\n"
+            f"📸 Анализов: {stats['analyses_used']}/{stats['analyses_limit']}\n"
+            f"🤖 Вопросов: {stats['questions_used']}/{stats['questions_limit']}\n\n"
+            f"<b>⭐ PRO — {PRO_PRICE}₽/мес:</b>\n"
+            f"• Неограниченные растения\n"
+            f"• Безлимитные анализы фото\n"
+            f"• Безлимитные вопросы ИИ\n"
+            f"• Автопродление\n",
+            parse_mode="HTML",
+            reply_markup=pro_button_keyboard()
+        )
+    
     await callback.answer()
 
 
