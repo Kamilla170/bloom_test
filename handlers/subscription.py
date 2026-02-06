@@ -7,10 +7,9 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from config import ADMIN_USER_IDS, PRO_PRICE, FREE_LIMITS
 from database import get_db
 from services.subscription_service import (
-    get_user_plan, get_usage_stats, activate_pro, revoke_pro, 
-    is_pro, cancel_auto_payment
+    get_user_plan, get_usage_stats, activate_pro, revoke_pro, is_pro
 )
-from services.payment_service import create_payment, cancel_auto_payment as cancel_auto_pay
+from services.payment_service import create_payment, cancel_auto_payment
 
 logger = logging.getLogger(__name__)
 
