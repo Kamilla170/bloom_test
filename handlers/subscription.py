@@ -117,9 +117,9 @@ async def subscribe_pro_callback(callback: types.CallbackQuery):
     """Оформление подписки — создание платежа"""
     user_id = callback.from_user.id  # ИСПРАВЛЕНО: было callback.message.from_user.id
     
-    # Проверяем, может уже PRO
+    # Проверяем, может уже есть подписка
     if await is_pro(user_id):
-        await callback.answer("Вы уже PRO! ⭐", show_alert=True)
+        await callback.answer("У вас уже есть подписка! ⭐", show_alert=True)
         return
     
     processing_msg = await callback.message.answer(
@@ -191,7 +191,7 @@ async def show_subscription_callback(callback: types.CallbackQuery):
         grace_text = "\n⚠️ <b>Grace period — продлите подписку!</b>" if plan_info['is_grace_period'] else ""
         
         await callback.message.answer(
-            f"⭐ <b>Ваш план: Подписка</b>\n\n"
+            f"⭐ <b>Ваш план: PRO</b>\n\n"
             f"📅 Активна до: <b>{expires_str}</b>\n"
             f"📆 Осталось дней: <b>{plan_info['days_left']}</b>\n"
             f"{auto_text}"
@@ -226,7 +226,7 @@ async def show_subscription_callback(callback: types.CallbackQuery):
 async def grant_pro_command(message: types.Message):
     """
     /grant_pro {user_id} {days}
-    Выдать PRO подписку пользователю на N дней
+    Выдать подписку пользователю на N дней
     """
     if message.from_user.id not in ADMIN_USER_IDS:
         await message.reply("❌ Нет прав администратора")
@@ -267,7 +267,7 @@ async def grant_pro_command(message: types.Message):
         expires_str = expires_at.strftime('%d.%m.%Y %H:%M')
         
         await message.reply(
-            f"✅ <b>PRO выдан!</b>\n\n"
+            f"✅ <b>Подписка выдана!</b>\n\n"
             f"👤 Кому: {username} (ID: {target_user_id})\n"
             f"📅 На: {days} дней\n"
             f"⏰ До: {expires_str}",
@@ -279,7 +279,7 @@ async def grant_pro_command(message: types.Message):
             await message.bot.send_message(
                 chat_id=target_user_id,
                 text=(
-                    f"🎁 <b>Вам подарена PRO подписка!</b>\n\n"
+                    f"🎁 <b>Вам подарена подписка!</b>\n\n"
                     f"📅 Активна до: <b>{expires_str}</b>\n\n"
                     f"🌱 Неограниченный доступ к функциям бота"
                 ),
@@ -299,7 +299,7 @@ async def grant_pro_command(message: types.Message):
 async def revoke_pro_command(message: types.Message):
     """
     /revoke_pro {user_id}
-    Отозвать PRO подписку
+    Отозвать подписку
     """
     if message.from_user.id not in ADMIN_USER_IDS:
         await message.reply("❌ Нет прав администратора")
@@ -321,7 +321,7 @@ async def revoke_pro_command(message: types.Message):
         await revoke_pro(target_user_id)
         
         await message.reply(
-            f"✅ PRO отозван у пользователя {target_user_id}",
+            f"✅ Подписка отозвана у пользователя {target_user_id}",
             parse_mode="HTML"
         )
         
