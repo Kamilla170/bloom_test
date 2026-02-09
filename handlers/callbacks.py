@@ -3,7 +3,7 @@ from aiogram import Router, F, types
 from aiogram.fsm.context import FSMContext
 
 from keyboards.main_menu import main_menu, simple_back_menu
-from states.user_states import PlantStates
+from states.user_states import PlantStates, FeedbackStates
 from database import get_db
 
 logger = logging.getLogger(__name__)
@@ -233,7 +233,9 @@ async def snooze_monthly_reminder_callback(callback: types.CallbackQuery):
 
 
 @router.callback_query(F.data == "feedback")
-async def feedback_callback(callback: types.CallbackQuery):
-    """Меню обратной связи"""
-    from handlers.feedback import show_feedback_menu
-    await show_feedback_menu(callback)
+async def feedback_callback(callback: types.CallbackQuery, state: FSMContext):
+    """Обратная связь - упрощённая версия"""
+    from handlers.feedback import show_feedback_prompt
+    await state.set_state(FeedbackStates.writing_message)
+    await show_feedback_prompt(callback)
+    await callback.answer()
