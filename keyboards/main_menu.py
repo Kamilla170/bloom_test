@@ -16,7 +16,7 @@ def main_menu():
             InlineKeyboardButton(text="📊 Статистика", callback_data="stats")
         ],
         [
-            InlineKeyboardButton(text="⭐ PRO подписка", callback_data="show_subscription"),
+            InlineKeyboardButton(text="⭐ Подписка", callback_data="show_subscription"),
             InlineKeyboardButton(text="📝 Обратная связь", callback_data="feedback")
         ],
         [
