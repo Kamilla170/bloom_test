@@ -76,17 +76,6 @@ async def add_command(message: types.Message):
     )
 
 
-@router.message(Command("grow"))
-async def grow_command(message: types.Message, state: FSMContext):
-    """Команда /grow"""
-    await message.answer(
-        "🌿 <b>Выращиваем с нуля!</b>\n\n"
-        "🌱 Напишите, что хотите вырастить:",
-        parse_mode="HTML"
-    )
-    await state.set_state(PlantStates.choosing_plant_to_grow)
-
-
 @router.message(Command("analyze"))
 async def analyze_command(message: types.Message):
     """Команда /analyze"""
@@ -398,7 +387,6 @@ async def help_command(message: types.Message):
 
 <b>Команды:</b>
 /start - Главное меню
-/grow - Вырастить с нуля
 /help - Справка
     """
     
