@@ -114,23 +114,6 @@ async def my_plants_callback(callback: types.CallbackQuery):
     await show_plants_collection(callback)
 
 
-@router.callback_query(F.data == "grow_from_scratch")
-async def grow_from_scratch_callback(callback: types.CallbackQuery, state: FSMContext):
-    """Выращивание с нуля"""
-    await state.clear()
-    
-    await callback.message.answer(
-        "🌿 <b>Выращиваем растение с нуля!</b>\n\n"
-        "🌱 <b>Напишите, что хотите вырастить:</b>\n\n"
-        "💡 <b>Примеры:</b> Базилик, Герань, Тюльпаны, Фикус, Помидоры\n\n"
-        "✍️ Просто напишите название!",
-        parse_mode="HTML"
-    )
-    
-    await state.set_state(PlantStates.choosing_plant_to_grow)
-    await callback.answer()
-
-
 @router.callback_query(F.data == "save_plant")
 async def save_plant_callback(callback: types.CallbackQuery, state: FSMContext):
     """Сохранить проанализированное растение - теперь с выбором даты полива"""
