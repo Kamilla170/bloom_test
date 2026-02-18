@@ -185,6 +185,15 @@ async def water_single_plant_callback(callback: types.CallbackQuery):
                 f"⏰ Следующее напоминание через {result['next_watering_days']} дней",
                 parse_mode="HTML"
             )
+            
+            # === КОНТЕКСТНАЯ ПОДСКАЗКА: после первого полива ===
+            from handlers.onboarding import send_tip_if_needed, TIP_AFTER_WATERING
+            
+            async def _send_watering_tip():
+                await callback.message.answer(TIP_AFTER_WATERING)
+            
+            await send_tip_if_needed(user_id, 'watering', _send_watering_tip)
+            
         else:
             await callback.answer(f"❌ {result['error']}", show_alert=True)
         
@@ -209,6 +218,15 @@ async def water_plants_callback(callback: types.CallbackQuery):
                 parse_mode="HTML",
                 reply_markup=simple_back_menu()
             )
+            
+            # === КОНТЕКСТНАЯ ПОДСКАЗКА: после первого полива ===
+            from handlers.onboarding import send_tip_if_needed, TIP_AFTER_WATERING
+            
+            async def _send_watering_tip():
+                await callback.message.answer(TIP_AFTER_WATERING)
+            
+            await send_tip_if_needed(user_id, 'watering', _send_watering_tip)
+            
         else:
             await callback.message.answer("❌ Ошибка")
         
@@ -595,6 +613,18 @@ async def finish_save_plant(message_or_callback, user_id: int, last_watered: dat
                 await message_or_callback.answer(success_text, parse_mode="HTML", reply_markup=main_menu())
             else:
                 await message_or_callback.answer(success_text, parse_mode="HTML", reply_markup=main_menu())
+            
+            # === КОНТЕКСТНАЯ ПОДСКАЗКА: после первого сохранения ===
+            from handlers.onboarding import send_tip_if_needed, TIP_AFTER_SAVE
+            
+            async def _send_save_tip():
+                if isinstance(message_or_callback, types.Message):
+                    await message_or_callback.answer(TIP_AFTER_SAVE)
+                else:
+                    await message_or_callback.answer(TIP_AFTER_SAVE)
+            
+            await send_tip_if_needed(user_id, 'save', _send_save_tip)
+            
         else:
             error_msg = f"❌ {result['error']}"
             if isinstance(message_or_callback, types.Message):
