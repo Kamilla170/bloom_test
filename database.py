@@ -42,7 +42,10 @@ class PlantDatabase:
                     last_action TEXT,
                     plants_count INTEGER DEFAULT 0,
                     total_waterings INTEGER DEFAULT 0,
-                    questions_asked INTEGER DEFAULT 0
+                    questions_asked INTEGER DEFAULT 0,
+                    tip_analysis_shown BOOLEAN DEFAULT FALSE,
+                    tip_save_shown BOOLEAN DEFAULT FALSE,
+                    tip_watering_shown BOOLEAN DEFAULT FALSE
                 )
             """)
             
@@ -375,6 +378,10 @@ class PlantDatabase:
                 await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS plants_count INTEGER DEFAULT 0")
                 await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS total_waterings INTEGER DEFAULT 0")
                 await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS questions_asked INTEGER DEFAULT 0")
+                # Флаги контекстных подсказок онбординга
+                await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS tip_analysis_shown BOOLEAN DEFAULT FALSE")
+                await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS tip_save_shown BOOLEAN DEFAULT FALSE")
+                await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS tip_watering_shown BOOLEAN DEFAULT FALSE")
             except Exception as e:
                 logger.info(f"Колонки уже существуют: {e}")
             
